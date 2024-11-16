@@ -126,9 +126,11 @@ def load_from_raw(
         with h5py.File(ep_path, "r") as ep:
             state = torch.from_numpy(ep["/state/robot"][:])
             if qpos:
-                action = torch.from_numpy(ep["/action/robot"][:])
+                # concatenate the robot state with the hand state
+                action = torch.from_numpy(np.concatenate([ep["/action/robot"][:], ep["/action/hand"][:]], axis=1))
             else:
-                action = torch.from_numpy(ep["/action/pose"][:])
+                # concatenate the ee pose state with the hand state
+                action = torch.from_numpy(np.concatenate([ep["/action/pose"][:], ep["/action/hand"][:]], axis=1))
 
             ep_dict = {}
             matched = None
