@@ -28,6 +28,7 @@ class RandomSubsetApply(Transform):
     Args:
         transforms: list of transformations.
         p: represents the multinomial probabilities (with no replacement) used for sampling the transform.
+            Weights with -1 means that the transform will must be applied and they will be applied after the random ones.
             If the sum of the weights is not 1, they will be normalized. If ``None`` (default), all transforms
             have the same probability.
         n_subset: number of transformations to apply. If ``None``, all transforms are applied.
@@ -60,6 +61,9 @@ class RandomSubsetApply(Transform):
             raise ValueError(f"n_subset should be in the interval [1, {len(transforms)}]")
 
         self.transforms = transforms
+        # find p with -1 and set them to 0
+        self.necessary_indices = [i for i, prob in enumerate(p) if prob == -1]
+        p = [0 if i in self.necessary_indices else prob for i, prob in enumerate(p)]
         total = sum(p)
         self.p = [prob / total for prob in p]
         self.n_subset = n_subset
@@ -75,6 +79,11 @@ class RandomSubsetApply(Transform):
         selected_transforms = [self.transforms[i] for i in selected_indices]
 
         for transform in selected_transforms:
+            outputs = transform(*inputs)
+            inputs = outputs if needs_unpacking else (outputs,)
+        
+        necessary_transforms = [self.transforms[i] for i in self.necessary_indices]
+        for transform in necessary_transforms:
             outputs = transform(*inputs)
             inputs = outputs if needs_unpacking else (outputs,)
 
@@ -148,6 +157,7 @@ def get_image_transforms(
     hue_min_max: tuple[float, float] | None = None,
     sharpness_weight: float = 1.0,
     sharpness_min_max: tuple[float, float] | None = None,
+    custom_transforms: Dict[str, Any] | None = None,
     max_num_transforms: int | None = None,
     random_order: bool = False,
 ):
@@ -185,6 +195,11 @@ def get_image_transforms(
     if sharpness_min_max is not None and sharpness_weight > 0.0:
         weights.append(sharpness_weight)
         transforms.append(SharpnessJitter(sharpness=sharpness_min_max))
+    if custom_transforms is not None:
+        for transform, tf_props in custom_transforms.items():
+            weights.append(tf_props["weight"])
+            transform = getattr(v2, transform)(**tf_props["args"])
+            transforms.append(transform)
 
     n_subset = len(transforms)
     if max_num_transforms is not None:

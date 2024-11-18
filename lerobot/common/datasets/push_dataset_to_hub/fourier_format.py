@@ -124,7 +124,7 @@ def load_from_raw(
     for ep_idx in tqdm.tqdm(ep_ids):
         ep_path = hdf5_files[ep_idx]
         with h5py.File(ep_path, "r") as ep:
-            state = torch.from_numpy(ep["/state/robot"][:])
+            state = torch.from_numpy(np.concatenate([ep["/state/robot"][:], ep["/state/pose"][:], ep["/state/hand"][:]], axis=1))
             if qpos:
                 # concatenate the robot state with the hand state
                 action = torch.from_numpy(np.concatenate([ep["/action/robot"][:], ep["/action/hand"][:]], axis=1))

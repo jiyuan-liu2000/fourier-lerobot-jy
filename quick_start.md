@@ -6,3 +6,7 @@ python /home/len9/lerobot/lerobot/scripts/push_dataset_to_hub.py --raw-dir="/med
 ```bash
 DATA_DIR='/home/len9/lerobot/data/test' python lerobot/scripts/visualize_dataset.py --repo-id="" --episode-index=1 --root="/home/len9/lerobot/data/test"
 ```
+# Train ACT policy
+```bash
+python lerobot/scripts/train.py policy=act_fourier_real env=fourier_real
+```
