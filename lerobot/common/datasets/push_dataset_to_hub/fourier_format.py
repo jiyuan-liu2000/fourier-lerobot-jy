@@ -114,7 +114,7 @@ def load_from_raw(
     video: bool,
     episodes: list[int] | None = None,
     encoding: dict | None = None,
-    qpos: bool = True,
+    use_qpos_action: bool = True,
 ):
     hdf5_files = sorted(raw_dir.glob("episode_*.hdf5"))
     num_episodes = len(hdf5_files)
@@ -125,13 +125,12 @@ def load_from_raw(
         ep_path = hdf5_files[ep_idx]
         with h5py.File(ep_path, "r") as ep:
             state = torch.from_numpy(np.concatenate([ep["/state/robot"][:], ep["/state/pose"][:], ep["/state/hand"][:]], axis=1))
-            if qpos:
+            if use_qpos_action:
                 # concatenate the robot state with the hand state
                 action = torch.from_numpy(np.concatenate([ep["/action/robot"][:], ep["/action/hand"][:]], axis=1))
             else:
                 # concatenate the ee pose state with the hand state
                 action = torch.from_numpy(np.concatenate([ep["/action/pose"][:], ep["/action/hand"][:]], axis=1))
-
             ep_dict = {}
             matched = None
             num_frames = None
@@ -223,15 +222,15 @@ def from_raw_to_lerobot_format(
     video: bool = True,
     episodes: list[int] | None = None,
     encoding: dict | None = None,
-    qpos: bool = True, # Whether use qpos or ee pose for training
+    use_qpos_action: bool = True, # Whether use qpos or ee pose action for training
 ):
     # sanity check
     check_format(raw_dir)
 
     if fps is None:
-        fps = 50
+        fps = 30
 
-    data_dict = load_from_raw(raw_dir, videos_dir, fps, video, episodes, encoding, qpos)
+    data_dict = load_from_raw(raw_dir, videos_dir, fps, video, episodes, encoding, use_qpos_action)
     hf_dataset = to_hf_dataset(data_dict, video)
     episode_data_index = calculate_episode_data_index(hf_dataset)
     info = {
@@ -240,6 +239,7 @@ def from_raw_to_lerobot_format(
         "video": video,
     }
     if video:
-        info["encoding"] = get_default_encoding()
+        # info["encoding"] = get_default_encoding()
+        info["encoding"] = "libx264"
 
     return hf_dataset, episode_data_index, info

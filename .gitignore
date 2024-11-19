@@ -125,7 +125,7 @@ celerybeat.pid
 # Environments
 .env
 .venv
-env/
+# env/ # Add fourier env
 venv/
 env.bak/
 venv.bak/
@@ -153,3 +153,7 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+
+fourier_scripts/
+
+quick_start.md

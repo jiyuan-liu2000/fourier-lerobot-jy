@@ -86,17 +86,29 @@ def make_dataset(cfg, split: str = "train") -> LeRobotDataset | MultiLeRobotData
             hue_min_max=cfg_tf.hue.min_max,
             sharpness_weight=cfg_tf.sharpness.weight,
             sharpness_min_max=cfg_tf.sharpness.min_max,
+            custom_transforms=cfg_tf.custom_transforms,
             max_num_transforms=cfg_tf.max_num_transforms,
             random_order=cfg_tf.random_order,
         )
 
     if isinstance(cfg.dataset_repo_id, str):
-        dataset = LeRobotDataset(
-            cfg.dataset_repo_id,
-            split=split,
-            delta_timestamps=cfg.training.get("delta_timestamps"),
-            image_transforms=image_transforms,
-            video_backend=cfg.video_backend,
+        if hasattr(cfg, "dataset_root"):
+            logging.info(f"Using local dataset_root: {cfg.dataset_root}")
+            dataset = LeRobotDataset(
+                cfg.dataset_repo_id,
+                root=cfg.dataset_root,
+                split=split,
+                delta_timestamps=cfg.training.get("delta_timestamps"),
+                image_transforms=image_transforms,
+                video_backend=cfg.video_backend,
+            )
+        else:
+            dataset = LeRobotDataset(
+                cfg.dataset_repo_id,
+                split=split,
+                delta_timestamps=cfg.training.get("delta_timestamps"),
+                image_transforms=image_transforms,
+                video_backend=cfg.video_backend,
         )
     else:
         dataset = MultiLeRobotDataset(

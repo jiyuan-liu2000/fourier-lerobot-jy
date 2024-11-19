@@ -37,6 +37,7 @@ from torchvision.ops.misc import FrozenBatchNorm2d
 from lerobot.common.policies.act.configuration_act import ACTConfig
 from lerobot.common.policies.normalize import Normalize, Unnormalize
 
+from lerobot.common.vision.dinov2 import DINOv2BackBone
 
 class ACTPolicy(
     nn.Module,
@@ -321,15 +322,18 @@ class ACT(nn.Module):
 
         # Backbone for image feature extraction.
         if self.use_images:
-            backbone_model = getattr(torchvision.models, config.vision_backbone)(
-                replace_stride_with_dilation=[False, False, config.replace_final_stride_with_dilation],
-                weights=config.pretrained_backbone_weights,
-                norm_layer=FrozenBatchNorm2d,
-            )
-            # Note: The assumption here is that we are using a ResNet model (and hence layer4 is the final
-            # feature map).
-            # Note: The forward method of this returns a dict: {"feature_map": output}.
-            self.backbone = IntermediateLayerGetter(backbone_model, return_layers={"layer4": "feature_map"})
+            if config.vision_backbone == "dino_v2":
+                self.backbone = DINOv2BackBone()
+            else:
+                backbone_model = getattr(torchvision.models, config.vision_backbone)(
+                    replace_stride_with_dilation=[False, False, config.replace_final_stride_with_dilation],
+                    weights=config.pretrained_backbone_weights,
+                    norm_layer=FrozenBatchNorm2d,
+                )
+                # Note: The assumption here is that we are using a ResNet model (and hence layer4 is the final
+                # feature map).
+                # Note: The forward method of this returns a dict: {"feature_map": output}.
+                self.backbone = IntermediateLayerGetter(backbone_model, return_layers={"layer4": "feature_map"})
 
         # Transformer (acts as VAE decoder when training with the variational objective).
         self.encoder = ACTEncoder(config)
@@ -347,9 +351,14 @@ class ACT(nn.Module):
             )
         self.encoder_latent_input_proj = nn.Linear(config.latent_dim, config.dim_model)
         if self.use_images:
-            self.encoder_img_feat_input_proj = nn.Conv2d(
-                backbone_model.fc.in_features, config.dim_model, kernel_size=1
-            )
+            if config.vision_backbone == "dino_v2":
+                self.encoder_img_feat_input_proj = nn.Conv2d(
+                    self.backbone.num_channels, config.dim_model, kernel_size=1
+                )
+            else:
+                self.encoder_img_feat_input_proj = nn.Conv2d(
+                    backbone_model.fc.in_features, config.dim_model, kernel_size=1
+                )
         # Transformer encoder positional embeddings.
         n_1d_tokens = 1  # for the latent
         if self.use_robot_state:
