@@ -82,9 +82,6 @@ training:
     hue:
       weight: 1
       min_max: [-0.05, 0.05]
-    sharpness:
-      weight: 1
-      min_max: [0.8, 1.2]
     # Custom transforms
     custom_transforms:
       GaussianBlur:
@@ -92,6 +89,7 @@ training:
         args:
           kernel_size: [9, 9]
           sigma: [0.1, 2.0]
+      # Necessary for using Dino_v2 backbone
       CenterCrop:
         weight: -1
         args:
@@ -108,7 +106,7 @@ policy:
   # Input / output structure.
   n_obs_steps: 1
   chunk_size: 100
-  n_action_steps: 100
+  n_action_steps: 1
 
   input_shapes:
     # TODO(rcadene, alexander-soare): add variables for height and width from the dataset/env?

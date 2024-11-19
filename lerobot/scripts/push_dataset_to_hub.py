@@ -157,6 +157,7 @@ def push_dataset_to_hub(
     cache_dir: Path = Path("/tmp"),
     tests_data_dir: Path | None = None,
     encoding: dict | None = None,
+    use_qpos_action: bool = True,
 ):
     check_repo_id(repo_id)
     user_id, dataset_id = repo_id.split("/")
@@ -209,6 +210,7 @@ def push_dataset_to_hub(
         "video": video,
         "episodes": episodes,
         "encoding": encoding,
+        "use_qpos_action": use_qpos_action,
     }
 
     if "openx_rlds." in raw_format:
@@ -362,6 +364,12 @@ def main():
             "When provided, save tests artifacts into the given directory "
             "(e.g. `--tests-data-dir tests/data` will save to tests/data/{--repo-id})."
         ),
+    )
+    parser.add_argument(
+        "--use_qpos_action",
+        type=int,
+        default=1,
+        help="Whether use qpos or ee pose as action.",
     )
 
     args = parser.parse_args()
