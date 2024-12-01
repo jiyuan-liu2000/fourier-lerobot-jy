@@ -24,6 +24,7 @@ from collections import deque
 from itertools import chain
 from typing import Callable
 
+import hydra
 import einops
 import numpy as np
 import torch
@@ -295,6 +296,7 @@ class ACT(nn.Module):
         # The cls token forms parameters of the latent's distribution (like this [*means, *log_variances]).
         self.use_robot_state = "observation.state" in config.input_shapes
         self.use_images = any(k.startswith("observation.image") for k in config.input_shapes)
+        self.use_tactile = any(k.startswith("observation.tactile") for k in config.input_shapes)
         self.use_env_state = "observation.environment_state" in config.input_shapes
         if self.config.use_vae:
             self.vae_encoder = ACTEncoder(config, is_vae_encoder=True)
@@ -335,6 +337,10 @@ class ACT(nn.Module):
                 # Note: The forward method of this returns a dict: {"feature_map": output}.
                 self.backbone = IntermediateLayerGetter(backbone_model, return_layers={"layer4": "feature_map"})
 
+        # Backbone for tactile feature extraction.
+        if self.use_tactile:
+            self.tactile_backbone = hydra.utils.instantiate(config.tactile_backbone)
+
         # Transformer (acts as VAE decoder when training with the variational objective).
         self.encoder = ACTEncoder(config)
         self.decoder = ACTDecoder(config)
@@ -359,6 +365,10 @@ class ACT(nn.Module):
                 self.encoder_img_feat_input_proj = nn.Conv2d(
                     backbone_model.fc.in_features, config.dim_model, kernel_size=1
                 )
+        if self.use_tactile:
+            self.encoder_tactile_input_proj = nn.Linear(
+                self.tactile_backbone.num_channels, config.dim_model
+            )
         # Transformer encoder positional embeddings.
         n_1d_tokens = 1  # for the latent
         if self.use_robot_state:
@@ -368,7 +378,8 @@ class ACT(nn.Module):
         self.encoder_1d_feature_pos_embed = nn.Embedding(n_1d_tokens, config.dim_model)
         if self.use_images:
             self.encoder_cam_feat_pos_embed = ACTSinusoidalPositionEmbedding2d(config.dim_model // 2)
-
+        if self.use_tactile:
+            self.encoder_tactile_feat_pos_embed = ACTSinusoidalPositionEmbedding2d(config.dim_model // 2)
         # Transformer decoder.
         # Learnable positional embedding for the transformer's decoder (in the style of DETR object queries).
         self.decoder_pos_embed = nn.Embedding(config.chunk_size, config.dim_model)
@@ -499,6 +510,23 @@ class ACT(nn.Module):
             encoder_in_tokens.extend(einops.rearrange(all_cam_features, "b c h w -> (h w) b c"))
             all_cam_pos_embeds = torch.cat(all_cam_pos_embeds, axis=-1)
             encoder_in_pos_embed.extend(einops.rearrange(all_cam_pos_embeds, "b c h w -> (h w) b c"))
+        
+        # Tactile observation features.
+        if self.use_tactile:
+            all_tactile_features = []
+            all_tactile_pos_embeds = []
+            for sensor_index in range(batch["observation.tactile"].shape[-3]): # shape: (B, S, H, W), S is the number of sensors
+                tactile_features = self.tactile_backbone(batch["observation.tactile"][:, sensor_index].unsqueeze(1))
+                tactile_pos_embed = self.encoder_tactile_feat_pos_embed(tactile_features).to(dtype=tactile_features.dtype)
+                tactile_features = self.encoder_tactile_input_proj(tactile_features)
+                all_tactile_features.append(tactile_features)
+                all_tactile_pos_embeds.append(tactile_pos_embed)
+            # Concatenate tactile observation feature maps and positional embeddings along the width dimension,
+            # and move to (sequence, batch, dim).
+            all_tactile_features = torch.cat(all_tactile_features, axis=-1)
+            encoder_in_tokens.extend(einops.rearrange(all_tactile_features, "b c h w -> (h w) b c"))
+            all_tactile_pos_embeds = torch.cat(all_tactile_pos_embeds, axis=-1)
+            encoder_in_pos_embed.extend(einops.rearrange(all_tactile_pos_embeds, "b c h w -> (h w) b c"))
 
         # Stack all tokens along the sequence dimension.
         encoder_in_tokens = torch.stack(encoder_in_tokens, axis=0)
