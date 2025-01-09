@@ -5,6 +5,6 @@ fps: 30
 env:
   name: real_world
   task: null
-  state_dim: 43
-  action_dim: 29
+  state_dim: 13
+  action_dim: 13
   fps: ${fps}

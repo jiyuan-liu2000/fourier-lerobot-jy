@@ -156,9 +156,9 @@ class DiffusionConfig:
 
     def __post_init__(self):
         """Input validation (not exhaustive)."""
-        if not self.vision_backbone.startswith("resnet"):
+        if not self.vision_backbone.startswith("resnet") and not self.vision_backbone.startswith("dino"):
             raise ValueError(
-                f"`vision_backbone` must be one of the ResNet variants. Got {self.vision_backbone}."
+                f"`vision_backbone` must be one of the ResNet or Dino variants. Got {self.vision_backbone}."
             )
 
         image_keys = {k for k in self.input_shapes if k.startswith("observation.image")}

@@ -213,6 +213,9 @@ def push_dataset_to_hub(
         "use_qpos_action": use_qpos_action,
     }
 
+    if raw_format != "fourier":
+        fmt_kwgs.pop("use_qpos_action")
+
     if "openx_rlds." in raw_format:
         # Support for official OXE dataset name inside `raw_format`.
         # For instance, `raw_format="oxe_rlds"` uses the default formating (TODO what does that mean?),

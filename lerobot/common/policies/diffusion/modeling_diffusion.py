@@ -42,6 +42,7 @@ from lerobot.common.policies.utils import (
     populate_queues,
 )
 
+from lerobot.common.vision.dinov2 import DINOv2BackBone
 
 class DiffusionPolicy(
     nn.Module,
@@ -463,12 +464,18 @@ class DiffusionRgbEncoder(nn.Module):
             self.do_crop = False
 
         # Set up backbone.
-        backbone_model = getattr(torchvision.models, config.vision_backbone)(
-            weights=config.pretrained_backbone_weights
-        )
-        # Note: This assumes that the layer4 feature map is children()[-3]
-        # TODO(alexander-soare): Use a safer alternative.
-        self.backbone = nn.Sequential(*(list(backbone_model.children())[:-2]))
+        if config.vision_backbone == "dino_v2":
+            self.backbone = DINOv2BackBone()
+            # Frozen by default.
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+        else:
+            backbone_model = getattr(torchvision.models, config.vision_backbone)(
+                weights=config.pretrained_backbone_weights
+            )
+            # Note: This assumes that the layer4 feature map is children()[-3]
+            # TODO(alexander-soare): Use a safer alternative.
+            self.backbone = nn.Sequential(*(list(backbone_model.children())[:-2]))
         if config.use_group_norm:
             if config.pretrained_backbone_weights:
                 raise ValueError(
@@ -494,6 +501,11 @@ class DiffusionRgbEncoder(nn.Module):
         dummy_input = torch.zeros(size=(1, config.input_shapes[image_key][0], *dummy_input_h_w))
         with torch.inference_mode():
             dummy_feature_map = self.backbone(dummy_input)
+        if isinstance(dummy_feature_map, dict):
+            self.use_feature_map_key = True
+            dummy_feature_map = dummy_feature_map["feature_map"]
+        else:
+            self.use_feature_map_key = False
         feature_map_shape = tuple(dummy_feature_map.shape[1:])
         self.pool = SpatialSoftmax(feature_map_shape, num_kp=config.spatial_softmax_num_keypoints)
         self.feature_dim = config.spatial_softmax_num_keypoints * 2
@@ -515,7 +527,10 @@ class DiffusionRgbEncoder(nn.Module):
                 # Always use center crop for eval.
                 x = self.center_crop(x)
         # Extract backbone feature.
-        x = torch.flatten(self.pool(self.backbone(x)), start_dim=1)
+        if self.use_feature_map_key:
+            x = torch.flatten(self.pool(self.backbone(x)["feature_map"]), start_dim=1)
+        else:
+            x = torch.flatten(self.pool(self.backbone(x)), start_dim=1)
         # Final linear layer with non-linearity.
         x = self.relu(self.out(x))
         return x
