@@ -425,6 +425,7 @@ def train(cfg: DictConfig, out_dir: str | None = None, job_name: str | None = No
         dataloading_s = time.perf_counter() - start_time
 
         for key in batch:
+            logging.info(f"Load batch data shape:{batch[key].shape}")
             batch[key] = batch[key].to(device, non_blocking=True)
 
         train_info = update_policy(

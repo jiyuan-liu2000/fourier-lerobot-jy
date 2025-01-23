@@ -16,7 +16,9 @@
 """
 Contains utilities to process raw data format of png images files recorded with capture_camera_feed.py
 """
-
+import cv2
+import logging
+import numpy as np
 from pathlib import Path
 
 import torch
@@ -47,6 +49,7 @@ def load_from_raw(raw_dir: Path, fps: int, episodes: list[int] | None = None):
     num_frames = len(image_paths)
 
     ep_dict["observation.image"] = [PILImage.open(x) for x in image_paths]
+    # ep_dict["observation.image"] = [cv2.cvtColor(np.array(PILImage.open(x)), cv2.COLOR_BGR2RGB) for x in image_paths]
     ep_dict["episode_index"] = torch.tensor([ep_idx] * num_frames)
     ep_dict["frame_index"] = torch.arange(0, num_frames, 1)
     ep_dict["timestamp"] = torch.arange(0, num_frames, 1) / fps
@@ -92,7 +95,7 @@ def from_raw_to_lerobot_format(
 
     if fps is None:
         fps = 30
-
+    logging.debug(f'transforming raw data from "{raw_dir}" to lerobot format')
     data_dict = load_from_raw(raw_dir, videos_dir, fps, video, episodes)
     hf_dataset = to_hf_dataset(data_dict, video)
     episode_data_index = calculate_episode_data_index(hf_dataset)

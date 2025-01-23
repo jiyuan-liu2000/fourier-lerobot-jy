@@ -157,3 +157,5 @@ cython_debug/
 fourier_scripts/
 
 quick_start.md
+
+dinov2/

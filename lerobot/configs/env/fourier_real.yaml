@@ -3,8 +3,8 @@
 fps: 30
 
 env:
-  name: real_world
+  name: fourier_act
   task: null
-  state_dim: 43
-  action_dim: 29
+  state_dim: 26
+  action_dim: 26
   fps: ${fps}

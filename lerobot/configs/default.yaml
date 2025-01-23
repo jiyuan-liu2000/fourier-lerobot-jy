@@ -1,7 +1,7 @@
 defaults:
   - _self_
-  - env: pusht
-  - policy: diffusion
+  - env: fourier_real
+  - policy: act_fourier_real
 
 hydra:
   run:

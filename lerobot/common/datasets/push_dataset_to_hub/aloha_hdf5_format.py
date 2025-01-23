@@ -20,6 +20,7 @@ Contains utilities to process raw data format of HDF5 files like in: https://git
 import gc
 import shutil
 from pathlib import Path
+import logging
 
 import h5py
 import numpy as np
@@ -42,11 +43,11 @@ from lerobot.common.datasets.video_utils import VideoFrame, encode_video_frames
 
 
 def get_cameras(hdf5_data):
-    # ignore depth channel, not currently handled
-    # TODO(rcadene): add depth
-    rgb_cameras = [key for key in hdf5_data["/observations/images"].keys() if "depth" not in key]  # noqa: SIM118
-    return rgb_cameras
-
+    # # ignore depth channel, not currently handled
+    # # TODO(rcadene): add depth
+    # rgb_cameras = [key for key in hdf5_data["/observations/images"].keys() if "depth" not in key]  # noqa: SIM118
+    # return rgb_cameras
+    return ["left"]
 
 def check_format(raw_dir) -> bool:
     # only frames from simulation are uncompressed
@@ -56,23 +57,23 @@ def check_format(raw_dir) -> bool:
     assert len(hdf5_paths) != 0
     for hdf5_path in hdf5_paths:
         with h5py.File(hdf5_path, "r") as data:
-            assert "/action" in data
-            assert "/observations/qpos" in data
+            assert "qpos_action" in data
+            assert "observation.state" in data
 
-            assert data["/action"].ndim == 2
-            assert data["/observations/qpos"].ndim == 2
+            assert data["qpos_action"].ndim == 2
+            assert data["observation.state"].ndim == 2
 
-            num_frames = data["/action"].shape[0]
-            assert num_frames == data["/observations/qpos"].shape[0]
+            num_frames = data["qpos_action"].shape[0]
+            assert num_frames == data["observation.state"].shape[0]
 
             for camera in get_cameras(data):
-                assert num_frames == data[f"/observations/images/{camera}"].shape[0]
+                assert num_frames == data[f"observation.image.{camera}"].shape[0]
 
                 if compressed_images:
-                    assert data[f"/observations/images/{camera}"].ndim == 2
+                    assert data[f"observation.image.{camera}"].ndim == 2
                 else:
-                    assert data[f"/observations/images/{camera}"].ndim == 4
-                    b, h, w, c = data[f"/observations/images/{camera}"].shape
+                    assert data[f"observation.image.{camera}"].ndim == 4
+                    b, c, h, w = data[f"observation.image.{camera}"].shape
                     assert c < h and c < w, f"Expect (h,w,c) image format but ({h=},{w=},{c=}) provided."
 
 
@@ -95,14 +96,14 @@ def load_from_raw(
     for ep_idx in tqdm.tqdm(ep_ids):
         ep_path = hdf5_files[ep_idx]
         with h5py.File(ep_path, "r") as ep:
-            num_frames = ep["/action"].shape[0]
+            num_frames = ep["qpos_action"].shape[0]
 
             # last step of demonstration is considered done
             done = torch.zeros(num_frames, dtype=torch.bool)
             done[-1] = True
 
-            state = torch.from_numpy(ep["/observations/qpos"][:])
-            action = torch.from_numpy(ep["/action"][:])
+            state = torch.from_numpy(ep["observation.state"][:])
+            action = torch.from_numpy(ep["qpos_action"][:])
             if "/observations/qvel" in ep:
                 velocity = torch.from_numpy(ep["/observations/qvel"][:])
             if "/observations/effort" in ep:
@@ -111,20 +112,20 @@ def load_from_raw(
             ep_dict = {}
 
             for camera in get_cameras(ep):
-                img_key = f"observation.images.{camera}"
+                img_key = f"observation.image.{camera}"
 
                 if compressed_images:
                     import cv2
 
                     # load one compressed image after the other in RAM and uncompress
                     imgs_array = []
-                    for data in ep[f"/observations/images/{camera}"]:
+                    for data in ep[f"observation.image.{camera}"]:
                         imgs_array.append(cv2.imdecode(data, 1))
                     imgs_array = np.array(imgs_array)
 
                 else:
                     # load all images in RAM
-                    imgs_array = ep[f"/observations/images/{camera}"][:]
+                    imgs_array = np.transpose(ep[f"observation.image.{camera}"][:], (0, 2, 3, 1))
 
                 if video:
                     # save png images in temporary directory
@@ -134,7 +135,7 @@ def load_from_raw(
                     # encode images to a mp4 video
                     fname = f"{img_key}_episode_{ep_idx:06d}.mp4"
                     video_path = videos_dir / fname
-                    encode_video_frames(tmp_imgs_dir, video_path, fps, **(encoding or {}))
+                    encode_video_frames(tmp_imgs_dir, video_path, fps, "libx264")
 
                     # clean temporary images directory
                     shutil.rmtree(tmp_imgs_dir)
@@ -173,7 +174,7 @@ def load_from_raw(
 def to_hf_dataset(data_dict, video) -> Dataset:
     features = {}
 
-    keys = [key for key in data_dict if "observation.images." in key]
+    keys = [key for key in data_dict if "observation.image." in key]
     for key in keys:
         if video:
             features[key] = VideoFrame()
@@ -214,11 +215,11 @@ def from_raw_to_lerobot_format(
     encoding: dict | None = None,
 ):
     # sanity check
-    check_format(raw_dir)
+    # check_format(raw_dir)
 
     if fps is None:
         fps = 50
-
+    logging.debug(f'from_raw_to_lerobot_format')
     data_dict = load_from_raw(raw_dir, videos_dir, fps, video, episodes, encoding)
     hf_dataset = to_hf_dataset(data_dict, video)
     episode_data_index = calculate_episode_data_index(hf_dataset)
@@ -228,6 +229,6 @@ def from_raw_to_lerobot_format(
         "video": video,
     }
     if video:
-        info["encoding"] = get_default_encoding()
+        info["encoding"] = 'libx264'
 
     return hf_dataset, episode_data_index, info

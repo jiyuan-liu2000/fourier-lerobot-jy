@@ -44,6 +44,7 @@ python lerobot/scripts/push_dataset_to_hub.py \
 
 import argparse
 import json
+import logging
 import shutil
 import warnings
 from pathlib import Path
@@ -58,6 +59,7 @@ from lerobot.common.datasets.lerobot_dataset import CODEBASE_VERSION, LeRobotDat
 from lerobot.common.datasets.push_dataset_to_hub.utils import check_repo_id
 from lerobot.common.datasets.utils import create_branch, create_lerobot_dataset_card, flatten_dict
 
+logging.basicConfig(level=logging.DEBUG)
 
 def get_from_raw_to_lerobot_format_fn(raw_format: str):
     if raw_format == "pusht_zarr":
@@ -100,6 +102,7 @@ def save_meta_data(
 
     # save episode_data_index
     episode_data_index = {key: torch.tensor(episode_data_index[key]) for key in episode_data_index}
+    # episode_data_index = {key: torch.tensor(episode_data_index[key]).clone().detach() for key in episode_data_index}
     ep_data_idx_path = meta_data_dir / "episode_data_index.safetensors"
     save_file(episode_data_index, ep_data_idx_path)
 
@@ -202,6 +205,7 @@ def push_dataset_to_hub(
 
     # convert dataset from original raw format to LeRobot format
     from_raw_to_lerobot_format = get_from_raw_to_lerobot_format_fn(raw_format)
+    logging.debug(f'start trans :{from_raw_to_lerobot_format}')
 
     fmt_kwgs = {
         "raw_dir": raw_dir,
@@ -213,6 +217,9 @@ def push_dataset_to_hub(
         "use_qpos_action": use_qpos_action,
     }
 
+    if 'fourier' not in raw_format:
+        fmt_kwgs.pop("use_qpos_action")
+
     if "openx_rlds." in raw_format:
         # Support for official OXE dataset name inside `raw_format`.
         # For instance, `raw_format="oxe_rlds"` uses the default formating (TODO what does that mean?),
@@ -222,7 +229,7 @@ def push_dataset_to_hub(
         fmt_kwgs["openx_dataset_name"] = openx_dataset_name
 
     hf_dataset, episode_data_index, info = from_raw_to_lerobot_format(**fmt_kwgs)
-
+    logging.debug(f'finish trans from_raw_to_lerobot_format, start trans lerobot dataset')
     lerobot_dataset = LeRobotDataset.from_preloaded(
         repo_id=repo_id,
         hf_dataset=hf_dataset,
@@ -230,6 +237,7 @@ def push_dataset_to_hub(
         info=info,
         videos_dir=videos_dir,
     )
+    logging.debug(f'finish trans lerobot dataset, start compute stats')
     stats = compute_stats(lerobot_dataset, batch_size, num_workers)
 
     if local_dir:
@@ -306,7 +314,7 @@ def main():
     parser.add_argument(
         "--push-to-hub",
         type=int,
-        default=1,
+        default=0,
         help="Upload to hub.",
     )
     parser.add_argument(

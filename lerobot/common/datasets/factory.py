@@ -123,6 +123,7 @@ def make_dataset(cfg, split: str = "train") -> LeRobotDataset | MultiLeRobotData
         for key, stats_dict in cfg.override_dataset_stats.items():
             for stats_type, listconfig in stats_dict.items():
                 # example of stats_type: min, max, mean, std
+                print(f'Overriding {key} {stats_type}')
                 stats = OmegaConf.to_container(listconfig, resolve=True)
                 dataset.stats[key][stats_type] = torch.tensor(stats, dtype=torch.float32)
 

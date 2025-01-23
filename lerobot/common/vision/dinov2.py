@@ -1,3 +1,13 @@
+'''
+Author: Jiyuan Liu
+Date: 2025-01-10 15:30:48
+LastEditors: Jiyuan Liu
+LastEditTime: 2025-01-22 16:44:37
+FilePath: /fourier-lerobot/lerobot/common/vision/dinov2.py
+Description: 
+
+Copyright (c) 2024 by Fourier Intelligence Co. Ltd , All Rights Reserved. 
+'''
 import torch
 from collections import OrderedDict
 from torch import nn
@@ -6,6 +16,7 @@ class DINOv2BackBone(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.body = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
+        # self.body = torch.hub.load(repo_or_dir='dinov2', model='dinov2_vits14', source='local')
         self.body.eval()
         self.num_channels = 384
     
