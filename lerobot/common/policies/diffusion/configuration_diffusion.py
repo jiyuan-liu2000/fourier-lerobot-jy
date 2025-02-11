@@ -173,10 +173,12 @@ class DiffusionConfig:
                         self.crop_shape[0] > self.input_shapes[image_key][1]
                         or self.crop_shape[1] > self.input_shapes[image_key][2]
                     ):
-                        raise ValueError(
+                        import warnings
+                        # raise ValueError(
+                        warnings.warn(
                             f"`crop_shape` should fit within `input_shapes[{image_key}]`. Got {self.crop_shape} "
                             f"for `crop_shape` and {self.input_shapes[image_key]} for "
-                            "`input_shapes[{image_key}]`."
+                            f"`input_shapes[{image_key}]`."
                         )
             # Check that all input images have the same shape.
             first_image_key = next(iter(image_keys))

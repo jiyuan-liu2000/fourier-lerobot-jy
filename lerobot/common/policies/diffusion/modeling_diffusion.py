@@ -43,6 +43,7 @@ from lerobot.common.policies.utils import (
 )
 
 from lerobot.common.vision.dinov2 import DINOv2BackBone
+from lerobot.common.vision.img_crop import SquareCenterCropAndResize
 
 class DiffusionPolicy(
     nn.Module,
@@ -169,6 +170,11 @@ def _make_noise_scheduler(name: str, **kwargs: dict) -> DDPMScheduler | DDIMSche
         return DDIMScheduler(**kwargs)
     else:
         raise ValueError(f"Unsupported noise scheduler type {name}")
+
+class DiffusionTemporalEnsembler:
+    def __init__(self, temporal_ensemble_coeff: float, steps: int):
+        # TODO
+        pass
 
 
 class DiffusionModel(nn.Module):
@@ -455,7 +461,11 @@ class DiffusionRgbEncoder(nn.Module):
         if config.crop_shape is not None:
             self.do_crop = True
             # Always use center crop for eval
-            self.center_crop = torchvision.transforms.CenterCrop(config.crop_shape)
+            self.center_crop = SquareCenterCropAndResize(config.crop_shape)
+            # if config.resize_crop:
+            #     self.center_crop = SquareCenterCropAndResize(config.crop_shape)
+            # else:
+            #     self.center_crop = torchvision.transforms.CenterCrop(config.crop_shape)
             if config.crop_is_random:
                 self.maybe_random_crop = torchvision.transforms.RandomCrop(config.crop_shape)
             else:
