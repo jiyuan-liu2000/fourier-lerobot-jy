@@ -365,6 +365,14 @@ class DiffusionModel(nn.Module):
 
         loss = F.mse_loss(pred, target, reduction="none")
 
+        # 通过系数控制臂和灵巧手的比例
+        coeffs = torch.ones(loss.shape[-1], device=loss.device)
+        # coeffs[:14] = self.config.arm_loss_coeff    # 机器人臂部分的系数
+        # coeffs[14:] = self.config.hand_loss_coeff   # 灵巧手部分的系数
+        coeffs[:14] = 2
+        coeffs[14:] = 1
+        loss = loss * coeffs
+
         # Mask loss wherever the action is padded with copies (edges of the dataset trajectory).
         if self.config.do_mask_loss_for_padding:
             if "action_is_pad" not in batch:

@@ -389,6 +389,7 @@ def train(cfg: DictConfig, out_dir: str | None = None, job_name: str | None = No
                 optimizer,
                 lr_scheduler,
                 identifier=step_identifier,
+                max_checkpoints=cfg.training.max_checkpoints,
             )
             logging.info("Resume training")
 

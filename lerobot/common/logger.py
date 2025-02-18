@@ -23,6 +23,7 @@ import os
 import re
 from glob import glob
 from pathlib import Path
+import shutil
 
 import torch
 from huggingface_hub.constants import SAFETENSORS_SINGLE_FILE
@@ -196,6 +197,7 @@ class Logger:
         optimizer: Optimizer,
         scheduler: LRScheduler | None,
         identifier: str,
+        max_checkpoints: int | None,
     ):
         """Checkpoint the model weights and the training state."""
         checkpoint_dir = self.checkpoints_dir / str(identifier)
@@ -209,6 +211,15 @@ class Logger:
         )
         self.save_training_state(checkpoint_dir, train_step, optimizer, scheduler)
         os.symlink(checkpoint_dir.absolute(), self.last_checkpoint_dir)
+
+        if max_checkpoints:
+            all_checkpoints = sorted(
+                [p for p in self.checkpoints_dir.iterdir() if p.is_dir()],
+                key=lambda x: x.stat().st_mtime
+            )
+            while len(all_checkpoints) > max_checkpoints:
+                oldest_checkpoint = all_checkpoints.pop(0)
+                shutil.rmtree(oldest_checkpoint)
 
     def load_last_training_state(self, optimizer: Optimizer, scheduler: LRScheduler | None) -> int:
         """
