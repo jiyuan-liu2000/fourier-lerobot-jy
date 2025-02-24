@@ -344,7 +344,7 @@ def train(cfg: DictConfig, out_dir: str | None = None, job_name: str | None = No
 
     num_learnable_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
     num_total_params = sum(p.numel() for p in policy.parameters())
-
+    cfg.training.offline_steps = 300000
     log_output_dir(out_dir)
     logging.info(f"{cfg.env.task=}")
     logging.info(f"{cfg.training.offline_steps=} ({format_big_number(cfg.training.offline_steps)})")

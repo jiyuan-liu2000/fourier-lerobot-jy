@@ -175,9 +175,9 @@ def read_hdf5_data(file_path):
 
 def main():
     parser = argparse.ArgumentParser(description='Process video data in parallel')
-    parser.add_argument('--data_dir', type=str, default='/mnt/nas/DataFactory/raw/data-samples',
+    parser.add_argument('--data_dir', type=str, default='/mnt/sda/lerobot/data/pnp-clamp',
                       help='Input video directory')
-    parser.add_argument('--output_dir', type=str, default='/mnt/sda/lerobot/samples_sim',
+    parser.add_argument('--output_dir', type=str, default='/mnt/sda/lerobot/data/pnp-clamp_sim',
                       help='Output directory')
     parser.add_argument('--target_width', type=int, default=224, help='Target image width')
     parser.add_argument('--target_height', type=int, default=224, help='Target image height')

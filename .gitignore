@@ -157,3 +157,6 @@ cython_debug/
 fourier_scripts/
 
 quick_start.md
+
+eval_dino.py
+dino_eval/
