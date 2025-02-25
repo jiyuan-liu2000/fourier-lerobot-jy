@@ -66,12 +66,14 @@ def process_single_video(i, video_dir, output_dir, actions, states, timestamps, 
         # Resize using the maintain_aspect_ratio_resize function
         resized_frame = maintain_aspect_ratio_resize(frame, target_size)
         resized_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2RGB)
-        transposed_frame = np.transpose(resized_frame, (2, 0, 1))
-        frames.append(transposed_frame)
-
+        # 压缩图像
+        _, compressed_frame = cv2.imencode('.jpg', resized_frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        # 将压缩数据转换为字节串
+        frame_bytes = compressed_frame.tobytes()
+        frames.append(frame_bytes)
     cap.release()
 
-    video_array = np.array(frames)
+    video_array = np.array(frames, dtype=object)
     # for idx, img_array in enumerate(video_array):
     #     img_array = np.transpose(img_array, (1,2,0))
     #     img_array = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
@@ -83,7 +85,18 @@ def process_single_video(i, video_dir, output_dir, actions, states, timestamps, 
     hdf5_path = os.path.join(output_dir, hdf5_filename)
     
     with h5py.File(hdf5_path, 'w') as f:
-        f.create_dataset('observation.image.left', data=video_array[:length], compression="gzip")
+
+        # 创建变长数据类型的数据集
+        dt = h5py.special_dtype(vlen=np.uint8)
+        dset = f.create_dataset('observation.image.left', 
+                              shape=(length,), 
+                              dtype=dt,
+                              compression="gzip")
+        
+        # 保存压缩后的图像数据
+        for idx in range(length):
+            dset[idx] = np.frombuffer(video_array[idx], dtype=np.uint8)
+
         f.create_dataset('qpos_action', data=actions[i][:length], compression="gzip")
         f.create_dataset('observation.state', data=states[i][:length], compression="gzip")
         f.create_dataset('timestamp', data=timestamps[i][:length], compression="gzip")
