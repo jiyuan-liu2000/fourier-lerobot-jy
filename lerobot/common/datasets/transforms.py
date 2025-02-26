@@ -75,10 +75,12 @@ class RandomSubsetApply(Transform):
         selected_indices = torch.multinomial(torch.tensor(self.p), self.n_subset)
         if not self.random_order:
             selected_indices = selected_indices.sort().values
-
+        # print("transform:",self.transforms)
+        # print("selected_indices:",selected_indices)
         selected_transforms = [self.transforms[i] for i in selected_indices]
 
         for transform in selected_transforms:
+            # print("transform:",transform)
             outputs = transform(*inputs)
             inputs = outputs if needs_unpacking else (outputs,)
         

@@ -46,23 +46,22 @@ from lerobot.common.vision.dinov2 import DINOv2BackBone
 from lerobot.common.vision.img_crop import SquareCenterCropAndResize
 
 class DiffusionPolicy(
-    nn.Module,
-    PyTorchModelHubMixin,
-    library_name="lerobot",
-    repo_url="https://github.com/huggingface/lerobot",
-    tags=["robotics", "diffusion-policy"],
+    nn.Module,  # 继承PyTorch的基础模块类
+    PyTorchModelHubMixin,  # 继承HuggingFace模型仓库混入类
+    library_name="lerobot",  # 指定库名称
+    repo_url="https://github.com/huggingface/lerobot",  # 指定仓库URL
+    tags=["robotics", "diffusion-policy"],  # 模型标签
 ):
-    """
-    Diffusion Policy as per "Diffusion Policy: Visuomotor Policy Learning via Action Diffusion"
+    """Diffusion Policy as per "Diffusion Policy: Visuomotor Policy Learning via Action Diffusion"
     (paper: https://arxiv.org/abs/2303.04137, code: https://github.com/real-stanford/diffusion_policy).
     """
 
-    name = "diffusion"
+    name = "diffusion"  # 策略名称
 
     def __init__(
         self,
-        config: DiffusionConfig | None = None,
-        dataset_stats: dict[str, dict[str, Tensor]] | None = None,
+        config: DiffusionConfig | None = None,  # 策略配置，可选
+        dataset_stats: dict[str, dict[str, Tensor]] | None = None,  # 数据集统计信息，用于归一化
     ):
         """
         Args:
@@ -71,42 +70,62 @@ class DiffusionPolicy(
             dataset_stats: Dataset statistics to be used for normalization. If not passed here, it is expected
                 that they will be passed with a call to `load_state_dict` before the policy is used.
         """
-        super().__init__()
+        super().__init__()  # 初始化父类
         if config is None:
-            config = DiffusionConfig()
+            config = DiffusionConfig()  # 如果未提供配置，使用默认配置
         self.config = config
+        
+        # 创建输入数据归一化器
         self.normalize_inputs = Normalize(
-            config.input_shapes, config.input_normalization_modes, dataset_stats
+            config.input_shapes,  # 输入数据的形状字典
+            config.input_normalization_modes,  # 归一化模式字典
+            dataset_stats  # 数据集统计信息
         )
+        
+        # 创建目标数据归一化器
         self.normalize_targets = Normalize(
-            config.output_shapes, config.output_normalization_modes, dataset_stats
+            config.output_shapes,  # 输出数据的形状字典
+            config.output_normalization_modes,  # 归一化模式字典
+            dataset_stats  # 数据集统计信息
         )
+        
+        # 创建输出数据反归一化器
         self.unnormalize_outputs = Unnormalize(
-            config.output_shapes, config.output_normalization_modes, dataset_stats
+            config.output_shapes,
+            config.output_normalization_modes,
+            dataset_stats
         )
 
         # queues are populated during rollout of the policy, they contain the n latest observations and actions
+        # 队列在策略执行过程中填充，包含最新的n个观察和动作
         self._queues = None
 
+        # 创建扩散模型实例
         self.diffusion = DiffusionModel(config)
 
+        # 获取所有图像观察的键名
         self.expected_image_keys = [k for k in config.input_shapes if k.startswith("observation.image")]
+        # 检查是否使用环境状态
         self.use_env_state = "observation.environment_state" in config.input_shapes
 
+        # 初始化重置队列
         self.reset()
 
     def reset(self):
-        """Clear observation and action queues. Should be called on `env.reset()`"""
+        """重置观察和动作队列，在环境重置(env.reset())时调用"""
+        # 初始化状态和动作的历史队列
         self._queues = {
-            "observation.state": deque(maxlen=self.config.n_obs_steps),
-            "action": deque(maxlen=self.config.n_action_steps),
+            "observation.state": deque(maxlen=self.config.n_obs_steps),  # 状态观察队列，限制最大长度
+            "action": deque(maxlen=self.config.n_action_steps),  # 动作队列，限制最大长度
         }
+        # 如果使用图像输入，添加图像观察队列
         if len(self.expected_image_keys) > 0:
             self._queues["observation.images"] = deque(maxlen=self.config.n_obs_steps)
+        # 如果使用环境状态，添加环境状态队列
         if self.use_env_state:
             self._queues["observation.environment_state"] = deque(maxlen=self.config.n_obs_steps)
 
-    @torch.no_grad
+    @torch.no_grad  # 推理时不需要计算梯度
     def select_action(self, batch: dict[str, Tensor]) -> Tensor:
         """Select a single action given environment observations.
 
@@ -128,80 +147,127 @@ class DiffusionPolicy(
         "horizon" may not the best name to describe what the variable actually means, because this period is
         actually measured from the first observation which (if `n_obs_steps` > 1) happened in the past.
         """
+        # 对输入数据进行归一化
         batch = self.normalize_inputs(batch)
+        
+        # 处理多相机图像输入
         if len(self.expected_image_keys) > 0:
-            batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
+            batch = dict(batch)  # 创建浅拷贝避免修改原始数据
+            # 将多个相机的图像堆叠成一个张量 (B,N,C,H,W)
             batch["observation.images"] = torch.stack([batch[k] for k in self.expected_image_keys], dim=-4)
-        # Note: It's important that this happens after stacking the images into a single key.
+            
+        # 更新观察历史队列
         self._queues = populate_queues(self._queues, batch)
 
+        # 如果动作队列为空，生成新的动作序列
         if len(self._queues["action"]) == 0:
-            # stack n latest observations from the queue
+            # 将队列中的观察历史堆叠成批次
             batch = {k: torch.stack(list(self._queues[k]), dim=1) for k in batch if k in self._queues}
+            # 使用扩散模型生成动作序列
             actions = self.diffusion.generate_actions(batch)
-
-            # TODO(rcadene): make above methods return output dictionary?
+            
+            # 将生成的动作转换回原始范围
             actions = self.unnormalize_outputs({"action": actions})["action"]
-
+            
+            # 将动作序列添加到队列中
             self._queues["action"].extend(actions.transpose(0, 1))
 
+        # 返回队列中的下一个动作
         action = self._queues["action"].popleft()
         return action
 
     def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
-        """Run the batch through the model and compute the loss for training or validation."""
+        """
+        训练或验证时的前向传播
+        
+        Args:
+            batch: 输入数据批次
+        Returns:
+            包含损失值的字典
+        """
+        # 对输入数据进行归一化
         batch = self.normalize_inputs(batch)
+        # 处理多相机图像输入
         if len(self.expected_image_keys) > 0:
-            batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
+            batch = dict(batch)
             batch["observation.images"] = torch.stack([batch[k] for k in self.expected_image_keys], dim=-4)
+        # 对目标数据进行归一化
         batch = self.normalize_targets(batch)
+        # 计算损失
         loss = self.diffusion.compute_loss(batch)
         return {"loss": loss}
 
 
 def _make_noise_scheduler(name: str, **kwargs: dict) -> DDPMScheduler | DDIMScheduler:
     """
-    Factory for noise scheduler instances of the requested type. All kwargs are passed
-    to the scheduler.
+    创建指定类型的噪声调度器
+    
+    Args:
+        name: 调度器类型 ('DDPM' 或 'DDIM')
+        kwargs: 传递给调度器的参数
+    Returns:
+        噪声调度器实例
     """
     if name == "DDPM":
         return DDPMScheduler(**kwargs)
     elif name == "DDIM":
         return DDIMScheduler(**kwargs)
     else:
-        raise ValueError(f"Unsupported noise scheduler type {name}")
+        raise ValueError(f"不支持的噪声调度器类型 {name}")
+
 
 class DiffusionTemporalEnsembler:
+    """时序集成器，用于组合多个时间步的预测结果"""
     def __init__(self, temporal_ensemble_coeff: float, steps: int):
-        # TODO
+        # TODO: 待实现
         pass
 
 
 class DiffusionModel(nn.Module):
+    """
+    扩散模型的核心实现
+    
+    功能:
+    1. 构建观察编码器
+    2. 生成动作序列
+    3. 计算训练损失
+    """
     def __init__(self, config: DiffusionConfig):
         super().__init__()
         self.config = config
 
-        # Build observation encoders (depending on which observations are provided).
-        global_cond_dim = config.input_shapes["observation.state"][0]
+        # 构建观察编码器
+        global_cond_dim = config.input_shapes["observation.state"][0]  # 基础条件维度为状态维度
+        
+        # 处理图像输入
         num_images = len([k for k in config.input_shapes if k.startswith("observation.image")])
         self._use_images = False
         self._use_env_state = False
+        
         if num_images > 0:
             self._use_images = True
             if self.config.use_separate_rgb_encoder_per_camera:
+                # 为每个相机创建单独的编码器
                 encoders = [DiffusionRgbEncoder(config) for _ in range(num_images)]
                 self.rgb_encoder = nn.ModuleList(encoders)
                 global_cond_dim += encoders[0].feature_dim * num_images
             else:
+                # 使用共享编码器
                 self.rgb_encoder = DiffusionRgbEncoder(config)
                 global_cond_dim += self.rgb_encoder.feature_dim * num_images
+                
+        # 处理环境状态输入
         if "observation.environment_state" in config.input_shapes:
             self._use_env_state = True
             global_cond_dim += config.input_shapes["observation.environment_state"][0]
 
-        self.unet = DiffusionConditionalUnet1d(config, global_cond_dim=global_cond_dim * config.n_obs_steps)
+        # 创建U-Net模型
+        self.unet = DiffusionConditionalUnet1d(
+            config, 
+            global_cond_dim=global_cond_dim * config.n_obs_steps
+        )
 
+        # 创建噪声调度器
         self.noise_scheduler = _make_noise_scheduler(
             config.noise_scheduler_type,
             num_train_timesteps=config.num_train_timesteps,
@@ -213,6 +279,7 @@ class DiffusionModel(nn.Module):
             prediction_type=config.prediction_type,
         )
 
+        # 设置推理步数
         if config.num_inference_steps is None:
             self.num_inference_steps = self.noise_scheduler.config.num_train_timesteps
         else:
@@ -220,12 +287,26 @@ class DiffusionModel(nn.Module):
 
     # ========= inference  ============
     def conditional_sample(
-        self, batch_size: int, global_cond: Tensor | None = None, generator: torch.Generator | None = None
+        self, 
+        batch_size: int, 
+        global_cond: Tensor | None = None, 
+        generator: torch.Generator | None = None
     ) -> Tensor:
+        """
+        条件生成采样
+        
+        Args:
+            batch_size: 批次大小
+            global_cond: 全局条件向量
+            generator: 随机数生成器
+        Returns:
+            生成的动作序列
+        """
+        # 获取设备和数据类型
         device = get_device_from_parameters(self)
         dtype = get_dtype_from_parameters(self)
 
-        # Sample prior.
+        # 从标准正态分布采样初始噪声
         sample = torch.randn(
             size=(batch_size, self.config.horizon, self.config.output_shapes["action"][0]),
             dtype=dtype,
@@ -233,79 +314,94 @@ class DiffusionModel(nn.Module):
             generator=generator,
         )
 
+        # 设置噪声调度器的时间步
         self.noise_scheduler.set_timesteps(self.num_inference_steps)
 
+        # 逐步去噪过程
         for t in self.noise_scheduler.timesteps:
-            # Predict model output.
+            # 预测模型输出
             model_output = self.unet(
                 sample,
                 torch.full(sample.shape[:1], t, dtype=torch.long, device=sample.device),
                 global_cond=global_cond,
             )
-            # Compute previous image: x_t -> x_t-1
+            # 计算前一个时间步的样本: x_t -> x_t-1
             sample = self.noise_scheduler.step(model_output, t, sample, generator=generator).prev_sample
 
         return sample
 
     def _prepare_global_conditioning(self, batch: dict[str, Tensor]) -> Tensor:
-        """Encode image features and concatenate them all together along with the state vector."""
+        """
+        编码图像特征并将其与状态向量拼接
+        
+        Args:
+            batch: 包含观察数据的字典
+        Returns:
+            拼接后的全局条件向量
+        """
+        # 获取批次大小和观察步数
         batch_size, n_obs_steps = batch["observation.state"].shape[:2]
+        # 初始化特征列表，首先添加状态向量
         global_cond_feats = [batch["observation.state"]]
-        # Extract image features.
+
+        # 提取图像特征
         if self._use_images:
             if self.config.use_separate_rgb_encoder_per_camera:
-                # Combine batch and sequence dims while rearranging to make the camera index dimension first.
+                # 重排图像维度，使相机索引维度在前
                 images_per_camera = einops.rearrange(batch["observation.images"], "b s n ... -> n (b s) ...")
+                # 使用每个相机的编码器处理对应图像
                 img_features_list = torch.cat(
                     [
                         encoder(images)
                         for encoder, images in zip(self.rgb_encoder, images_per_camera, strict=True)
                     ]
                 )
-                # Separate batch and sequence dims back out. The camera index dim gets absorbed into the
-                # feature dim (effectively concatenating the camera features).
+                # 重排特征维度，将相机特征拼接
                 img_features = einops.rearrange(
                     img_features_list, "(n b s) ... -> b s (n ...)", b=batch_size, s=n_obs_steps
                 )
             else:
-                # Combine batch, sequence, and "which camera" dims before passing to shared encoder.
+                # 使用共享编码器，合并批次、序列和相机维度
                 img_features = self.rgb_encoder(
                     einops.rearrange(batch["observation.images"], "b s n ... -> (b s n) ...")
                 )
-                # Separate batch dim and sequence dim back out. The camera index dim gets absorbed into the
-                # feature dim (effectively concatenating the camera features).
+                # 重排特征维度，将相机特征拼接
                 img_features = einops.rearrange(
                     img_features, "(b s n) ... -> b s (n ...)", b=batch_size, s=n_obs_steps
                 )
+            # 将图像特征添加到特征列表
             global_cond_feats.append(img_features)
 
+        # 如果使用环境状态，添加到特征列表
         if self._use_env_state:
             global_cond_feats.append(batch["observation.environment_state"])
 
-        # Concatenate features then flatten to (B, global_cond_dim).
+        # 拼接所有特征并展平为(B, global_cond_dim)
         return torch.cat(global_cond_feats, dim=-1).flatten(start_dim=1)
 
     def generate_actions(self, batch: dict[str, Tensor]) -> Tensor:
         """
-        This function expects `batch` to have:
+        生成动作序列
+        
+        输入batch需要包含:
         {
             "observation.state": (B, n_obs_steps, state_dim)
-
             "observation.images": (B, n_obs_steps, num_cameras, C, H, W)
-                AND/OR
+                和/或
             "observation.environment_state": (B, environment_dim)
         }
         """
+        # 获取批次大小和观察步数
         batch_size, n_obs_steps = batch["observation.state"].shape[:2]
         assert n_obs_steps == self.config.n_obs_steps
 
-        # Encode image features and concatenate them all together along with the state vector.
+        # 编码观察特征并拼接
         global_cond = self._prepare_global_conditioning(batch)  # (B, global_cond_dim)
 
-        # run sampling
+        # 运行采样过程
         actions = self.conditional_sample(batch_size, global_cond=global_cond)
 
-        # Extract `n_action_steps` steps worth of actions (from the current observation).
+        # 提取n_action_steps步的动作（从当前观察开始）
         start = n_obs_steps - 1
         end = start + self.config.n_action_steps
         actions = actions[:, start:end]
@@ -314,19 +410,19 @@ class DiffusionModel(nn.Module):
 
     def compute_loss(self, batch: dict[str, Tensor]) -> Tensor:
         """
-        This function expects `batch` to have (at least):
+        计算训练损失
+        
+        输入batch需要包含:
         {
             "observation.state": (B, n_obs_steps, state_dim)
-
             "observation.images": (B, n_obs_steps, num_cameras, C, H, W)
-                AND/OR
+                和/或
             "observation.environment_state": (B, environment_dim)
-
             "action": (B, horizon, action_dim)
             "action_is_pad": (B, horizon)
         }
         """
-        # Input validation.
+        # 输入验证
         assert set(batch).issuperset({"observation.state", "action", "action_is_pad"})
         assert "observation.images" in batch or "observation.environment_state" in batch
         n_obs_steps = batch["observation.state"].shape[1]
@@ -334,51 +430,49 @@ class DiffusionModel(nn.Module):
         assert horizon == self.config.horizon
         assert n_obs_steps == self.config.n_obs_steps
 
-        # Encode image features and concatenate them all together along with the state vector.
+        # 编码观察特征并拼接
         global_cond = self._prepare_global_conditioning(batch)  # (B, global_cond_dim)
 
-        # Forward diffusion.
+        # 前向扩散过程
         trajectory = batch["action"]
-        # Sample noise to add to the trajectory.
+        # 采样噪声添加到轨迹中
         eps = torch.randn(trajectory.shape, device=trajectory.device)
-        # Sample a random noising timestep for each item in the batch.
+        # 为批次中的每个样本随机采样噪声时间步
         timesteps = torch.randint(
             low=0,
             high=self.noise_scheduler.config.num_train_timesteps,
             size=(trajectory.shape[0],),
             device=trajectory.device,
         ).long()
-        # Add noise to the clean trajectories according to the noise magnitude at each timestep.
+        # 根据时间步的噪声幅度将噪声添加到干净轨迹中
         noisy_trajectory = self.noise_scheduler.add_noise(trajectory, eps, timesteps)
 
-        # Run the denoising network (that might denoise the trajectory, or attempt to predict the noise).
+        # 运行去噪网络（预测噪声或尝试直接去噪）
         pred = self.unet(noisy_trajectory, timesteps, global_cond=global_cond)
 
-        # Compute the loss.
-        # The target is either the original trajectory, or the noise.
+        # 计算损失
+        # 目标可以是原始轨迹或噪声
         if self.config.prediction_type == "epsilon":
             target = eps
         elif self.config.prediction_type == "sample":
             target = batch["action"]
         else:
-            raise ValueError(f"Unsupported prediction type {self.config.prediction_type}")
+            raise ValueError(f"不支持的预测类型 {self.config.prediction_type}")
 
         loss = F.mse_loss(pred, target, reduction="none")
 
-        # 通过系数控制臂和灵巧手的比例
+        # 通过系数控制机械臂和灵巧手的损失比例
         coeffs = torch.ones(loss.shape[-1], device=loss.device)
-        # coeffs[:14] = self.config.arm_loss_coeff    # 机器人臂部分的系数
-        # coeffs[14:] = self.config.hand_loss_coeff   # 灵巧手部分的系数
-        coeffs[:14] = 2
-        coeffs[14:] = 1
+        coeffs[:14] = 2  # 机械臂部分的损失权重
+        coeffs[14:] = 1  # 灵巧手部分的损失权重
         loss = loss * coeffs
 
-        # Mask loss wherever the action is padded with copies (edges of the dataset trajectory).
+        # 对填充的动作部分进行掩码（数据集轨迹边缘）
         if self.config.do_mask_loss_for_padding:
             if "action_is_pad" not in batch:
                 raise ValueError(
-                    "You need to provide 'action_is_pad' in the batch when "
-                    f"{self.config.do_mask_loss_for_padding=}."
+                    "当 do_mask_loss_for_padding=True 时，"
+                    "需要在batch中提供 'action_is_pad'"
                 )
             in_episode_bound = ~batch["action_is_pad"]
             loss = loss * in_episode_bound.unsqueeze(-1)
@@ -415,11 +509,14 @@ class SpatialSoftmax(nn.Module):
             input_shape (list): (C, H, W) input feature map shape.
             num_kp (int): number of keypoints in output. If None, output will have the same number of channels as input.
         """
+        # 初始化空间软最大值层
         super().__init__()
 
+        # 检查输入形状是否为3维
         assert len(input_shape) == 3
         self._in_c, self._in_h, self._in_w = input_shape
 
+        # 如果指定了关键点数量,添加1x1卷积层将输入通道映射到指定数量的关键点
         if num_kp is not None:
             self.nets = torch.nn.Conv2d(self._in_c, num_kp, kernel_size=1)
             self._out_c = num_kp
@@ -429,10 +526,13 @@ class SpatialSoftmax(nn.Module):
 
         # we could use torch.linspace directly but that seems to behave slightly differently than numpy
         # and causes a small degradation in pc_success of pre-trained models.
+        # 创建归一化的坐标网格,使用numpy.linspace以保持与预训练模型的兼容性
         pos_x, pos_y = np.meshgrid(np.linspace(-1.0, 1.0, self._in_w), np.linspace(-1.0, 1.0, self._in_h))
+        # 将坐标网格展平并转换为张量
         pos_x = torch.from_numpy(pos_x.reshape(self._in_h * self._in_w, 1)).float()
         pos_y = torch.from_numpy(pos_y.reshape(self._in_h * self._in_w, 1)).float()
         # register as buffer so it's moved to the correct device.
+        # 将坐标网格注册为缓冲区,以便自动移动到正确的设备
         self.register_buffer("pos_grid", torch.cat([pos_x, pos_y], dim=1))
 
     def forward(self, features: Tensor) -> Tensor:
@@ -442,16 +542,25 @@ class SpatialSoftmax(nn.Module):
         Returns:
             (B, K, 2) image-space coordinates of keypoints.
         """
+        # 如果指定了关键点数量,通过1x1卷积调整通道数
         if self.nets is not None:
             features = self.nets(features)
 
         # [B, K, H, W] -> [B * K, H * W] where K is number of keypoints
+        # 将特征图重塑为二维张量 [B, K, H, W] -> [B * K, H * W]
+        # K为关键点数量(等于输入通道数或指定的num_kp) 
         features = features.reshape(-1, self._in_h * self._in_w)
+        
         # 2d softmax normalization
+        # 对每个通道进行2D softmax归一化,得到注意力权重
         attention = F.softmax(features, dim=-1)
+        
         # [B * K, H * W] x [H * W, 2] -> [B * K, 2] for spatial coordinate mean in x and y dimensions
+        # 计算加权平均坐标 [B * K, H * W] x [H * W, 2] -> [B * K, 2]
         expected_xy = attention @ self.pos_grid
+        
         # reshape to [B, K, 2]
+        # 重塑为 [B, K, 2] 形状,表示每个关键点的(x,y)坐标
         feature_keypoints = expected_xy.view(-1, self._out_c, 2)
 
         return feature_keypoints
@@ -466,25 +575,31 @@ class DiffusionRgbEncoder(nn.Module):
     def __init__(self, config: DiffusionConfig):
         super().__init__()
         # Set up optional preprocessing.
+        # 设置可选的预处理步骤
         if config.crop_shape is not None:
             self.do_crop = True
             # Always use center crop for eval
+            # 评估时始终使用中心裁剪
             self.center_crop = SquareCenterCropAndResize(config.crop_shape)
             # if config.resize_crop:
             #     self.center_crop = SquareCenterCropAndResize(config.crop_shape)
             # else:
             #     self.center_crop = torchvision.transforms.CenterCrop(config.crop_shape)
             if config.crop_is_random:
+                # 训练时使用随机裁剪
                 self.maybe_random_crop = torchvision.transforms.RandomCrop(config.crop_shape)
             else:
+                # 不使用随机裁剪时使用中心裁剪
                 self.maybe_random_crop = self.center_crop
         else:
             self.do_crop = False
 
         # Set up backbone.
+        # 设置骨干网络
         if config.vision_backbone == "dino_v2":
             self.backbone = DINOv2BackBone()
             # Frozen by default.
+            # 默认冻结参数
             for param in self.backbone.parameters():
                 param.requires_grad = False
         else:
@@ -493,12 +608,14 @@ class DiffusionRgbEncoder(nn.Module):
             )
             # Note: This assumes that the layer4 feature map is children()[-3]
             # TODO(alexander-soare): Use a safer alternative.
+            # 移除最后两层(通常是全连接层和池化层)
             self.backbone = nn.Sequential(*(list(backbone_model.children())[:-2]))
         if config.use_group_norm:
             if config.pretrained_backbone_weights:
                 raise ValueError(
                     "You can't replace BatchNorm in a pretrained model without ruining the weights!"
                 )
+            # 将所有BatchNorm替换为GroupNorm
             self.backbone = _replace_submodules(
                 root_module=self.backbone,
                 predicate=lambda x: isinstance(x, nn.BatchNorm2d),
@@ -510,8 +627,11 @@ class DiffusionRgbEncoder(nn.Module):
         # The dummy input should take the number of image channels from `config.input_shapes` and it should
         # use the height and width from `config.crop_shape` if it is provided, otherwise it should use the
         # height and width from `config.input_shapes`.
+        # 设置池化和最终层
+        # 进行一次前向传播以获取特征图形状
         image_keys = [k for k in config.input_shapes if k.startswith("observation.image")]
         # Note: we have a check in the config class to make sure all images have the same shape.
+        # 注意:配置类中已确保所有图像具有相同形状
         image_key = image_keys[0]
         dummy_input_h_w = (
             config.crop_shape if config.crop_shape is not None else config.input_shapes[image_key][1:]
@@ -525,8 +645,10 @@ class DiffusionRgbEncoder(nn.Module):
         else:
             self.use_feature_map_key = False
         feature_map_shape = tuple(dummy_feature_map.shape[1:])
+        # 创建空间softmax池化层
         self.pool = SpatialSoftmax(feature_map_shape, num_kp=config.spatial_softmax_num_keypoints)
         self.feature_dim = config.spatial_softmax_num_keypoints * 2
+        # 创建最终的线性层和ReLU激活
         self.out = nn.Linear(config.spatial_softmax_num_keypoints * 2, self.feature_dim)
         self.relu = nn.ReLU()
 
@@ -538,18 +660,23 @@ class DiffusionRgbEncoder(nn.Module):
             (B, D) image feature.
         """
         # Preprocess: maybe crop (if it was set up in the __init__).
+        # 预处理:如果在__init__中设置了裁剪则进行裁剪
         if self.do_crop:
             if self.training:  # noqa: SIM108
+                # 训练时使用可能的随机裁剪
                 x = self.maybe_random_crop(x)
             else:
                 # Always use center crop for eval.
+                # 评估时始终使用中心裁剪
                 x = self.center_crop(x)
         # Extract backbone feature.
+        # 提取骨干网络特征
         if self.use_feature_map_key:
             x = torch.flatten(self.pool(self.backbone(x)["feature_map"]), start_dim=1)
         else:
             x = torch.flatten(self.pool(self.backbone(x)), start_dim=1)
         # Final linear layer with non-linearity.
+        # 通过最终的线性层和ReLU激活
         x = self.relu(self.out(x))
         return x
 
@@ -565,24 +692,36 @@ def _replace_submodules(
     Returns:
         The root module with its submodules replaced.
     """
+    # 如果根模块满足替换条件,直接替换并返回
     if predicate(root_module):
         return func(root_module)
 
+    # 获取所有需要替换的子模块路径
     replace_list = [k.split(".") for k, m in root_module.named_modules(remove_duplicate=True) if predicate(m)]
+    
+    # 遍历每个需要替换的子模块
     for *parents, k in replace_list:
+        # 获取父模块
         parent_module = root_module
         if len(parents) > 0:
             parent_module = root_module.get_submodule(".".join(parents))
+            
+        # 获取源模块
         if isinstance(parent_module, nn.Sequential):
             src_module = parent_module[int(k)]
         else:
             src_module = getattr(parent_module, k)
+            
+        # 生成目标替换模块
         tgt_module = func(src_module)
+        
+        # 执行替换
         if isinstance(parent_module, nn.Sequential):
             parent_module[int(k)] = tgt_module
         else:
             setattr(parent_module, k, tgt_module)
-    # verify that all BN are replaced
+            
+    # 验证所有需要替换的模块都已被替换
     assert not any(predicate(m) for _, m in root_module.named_modules(remove_duplicate=True))
     return root_module
 
@@ -591,14 +730,18 @@ class DiffusionSinusoidalPosEmb(nn.Module):
     """1D sinusoidal positional embeddings as in Attention is All You Need."""
 
     def __init__(self, dim: int):
+        # 初始化位置编码维度
         super().__init__()
         self.dim = dim
 
     def forward(self, x: Tensor) -> Tensor:
+        # 获取设备信息
         device = x.device
         half_dim = self.dim // 2
+        # 计算位置编码的频率
         emb = math.log(10000) / (half_dim - 1)
         emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
+        # 生成正弦和余弦编码
         emb = x.unsqueeze(-1) * emb.unsqueeze(0)
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
@@ -608,15 +751,18 @@ class DiffusionConv1dBlock(nn.Module):
     """Conv1d --> GroupNorm --> Mish"""
 
     def __init__(self, inp_channels, out_channels, kernel_size, n_groups=8):
+        # 初始化卷积块参数
         super().__init__()
 
+        # 构建卷积块序列
         self.block = nn.Sequential(
-            nn.Conv1d(inp_channels, out_channels, kernel_size, padding=kernel_size // 2),
-            nn.GroupNorm(n_groups, out_channels),
-            nn.Mish(),
+            nn.Conv1d(inp_channels, out_channels, kernel_size, padding=kernel_size // 2),  # 一维卷积层
+            nn.GroupNorm(n_groups, out_channels),  # 组归一化层
+            nn.Mish(),  # Mish激活函数
         )
 
     def forward(self, x):
+        # 前向传播
         return self.block(x)
 
 
@@ -627,49 +773,57 @@ class DiffusionConditionalUnet1d(nn.Module):
     """
 
     def __init__(self, config: DiffusionConfig, global_cond_dim: int):
+        # 初始化一维条件UNet
         super().__init__()
 
         self.config = config
 
         # Encoder for the diffusion timestep.
+        # 扩散时间步编码器,将时间步编码为高维特征
         self.diffusion_step_encoder = nn.Sequential(
-            DiffusionSinusoidalPosEmb(config.diffusion_step_embed_dim),
-            nn.Linear(config.diffusion_step_embed_dim, config.diffusion_step_embed_dim * 4),
-            nn.Mish(),
-            nn.Linear(config.diffusion_step_embed_dim * 4, config.diffusion_step_embed_dim),
+            DiffusionSinusoidalPosEmb(config.diffusion_step_embed_dim),  # 正弦位置编码
+            nn.Linear(config.diffusion_step_embed_dim, config.diffusion_step_embed_dim * 4),  # 线性层扩展维度
+            nn.Mish(),  # Mish激活函数
+            nn.Linear(config.diffusion_step_embed_dim * 4, config.diffusion_step_embed_dim),  # 线性层压缩维度
         )
 
         # The FiLM conditioning dimension.
+        # FiLM条件维度,包含时间步编码和全局条件
         cond_dim = config.diffusion_step_embed_dim + global_cond_dim
 
         # In channels / out channels for each downsampling block in the Unet's encoder. For the decoder, we
         # just reverse these.
+        # 定义UNet编码器每个下采样块的输入输出通道数,解码器则反转这些通道数
         in_out = [(config.output_shapes["action"][0], config.down_dims[0])] + list(
             zip(config.down_dims[:-1], config.down_dims[1:], strict=True)
         )
 
         # Unet encoder.
+        # UNet编码器配置
         common_res_block_kwargs = {
-            "cond_dim": cond_dim,
-            "kernel_size": config.kernel_size,
-            "n_groups": config.n_groups,
-            "use_film_scale_modulation": config.use_film_scale_modulation,
+            "cond_dim": cond_dim,  # 条件维度
+            "kernel_size": config.kernel_size,  # 卷积核大小
+            "n_groups": config.n_groups,  # 组归一化分组数
+            "use_film_scale_modulation": config.use_film_scale_modulation,  # 是否使用FiLM缩放调制
         }
+        # 构建下采样模块列表
         self.down_modules = nn.ModuleList([])
         for ind, (dim_in, dim_out) in enumerate(in_out):
             is_last = ind >= (len(in_out) - 1)
             self.down_modules.append(
                 nn.ModuleList(
                     [
+                        # 两个残差块用于特征提取
                         DiffusionConditionalResidualBlock1d(dim_in, dim_out, **common_res_block_kwargs),
                         DiffusionConditionalResidualBlock1d(dim_out, dim_out, **common_res_block_kwargs),
-                        # Downsample as long as it is not the last block.
+                        # 下采样层,最后一层使用恒等映射
                         nn.Conv1d(dim_out, dim_out, 3, 2, 1) if not is_last else nn.Identity(),
                     ]
                 )
             )
 
         # Processing in the middle of the auto-encoder.
+        # UNet中间层处理,包含两个残差块
         self.mid_modules = nn.ModuleList(
             [
                 DiffusionConditionalResidualBlock1d(
@@ -682,6 +836,7 @@ class DiffusionConditionalUnet1d(nn.Module):
         )
 
         # Unet decoder.
+        # UNet解码器,与编码器对称
         self.up_modules = nn.ModuleList([])
         for ind, (dim_out, dim_in) in enumerate(reversed(in_out[1:])):
             is_last = ind >= (len(in_out) - 1)
@@ -689,14 +844,17 @@ class DiffusionConditionalUnet1d(nn.Module):
                 nn.ModuleList(
                     [
                         # dim_in * 2, because it takes the encoder's skip connection as well
+                        # 输入通道数翻倍因为要拼接编码器的跳跃连接
                         DiffusionConditionalResidualBlock1d(dim_in * 2, dim_out, **common_res_block_kwargs),
                         DiffusionConditionalResidualBlock1d(dim_out, dim_out, **common_res_block_kwargs),
                         # Upsample as long as it is not the last block.
+                        # 上采样层,最后一层使用恒等映射
                         nn.ConvTranspose1d(dim_out, dim_out, 4, 2, 1) if not is_last else nn.Identity(),
                     ]
                 )
             )
 
+        # 最终输出层,将特征映射到动作空间
         self.final_conv = nn.Sequential(
             DiffusionConv1dBlock(config.down_dims[0], config.down_dims[0], kernel_size=config.kernel_size),
             nn.Conv1d(config.down_dims[0], config.output_shapes["action"][0], 1),
@@ -713,17 +871,21 @@ class DiffusionConditionalUnet1d(nn.Module):
             (B, T, input_dim) diffusion model prediction.
         """
         # For 1D convolutions we'll need feature dimension first.
+        # 调整输入维度顺序以适应1D卷积
         x = einops.rearrange(x, "b t d -> b d t")
 
+        # 编码时间步
         timesteps_embed = self.diffusion_step_encoder(timestep)
 
         # If there is a global conditioning feature, concatenate it to the timestep embedding.
+        # 如果有全局条件特征,将其与时间步编码拼接
         if global_cond is not None:
             global_feature = torch.cat([timesteps_embed, global_cond], axis=-1)
         else:
             global_feature = timesteps_embed
 
         # Run encoder, keeping track of skip features to pass to the decoder.
+        # 运行编码器,保存跳跃连接特征用于解码器
         encoder_skip_features: list[Tensor] = []
         for resnet, resnet2, downsample in self.down_modules:
             x = resnet(x, global_feature)
@@ -731,18 +893,22 @@ class DiffusionConditionalUnet1d(nn.Module):
             encoder_skip_features.append(x)
             x = downsample(x)
 
+        # 运行中间层处理
         for mid_module in self.mid_modules:
             x = mid_module(x, global_feature)
 
         # Run decoder, using the skip features from the encoder.
+        # 运行解码器,使用编码器的跳跃连接特征
         for resnet, resnet2, upsample in self.up_modules:
             x = torch.cat((x, encoder_skip_features.pop()), dim=1)
             x = resnet(x, global_feature)
             x = resnet2(x, global_feature)
             x = upsample(x)
 
+        # 最终输出层处理
         x = self.final_conv(x)
 
+        # 调整输出维度顺序
         x = einops.rearrange(x, "b d t -> b t d")
         return x
 
@@ -761,45 +927,75 @@ class DiffusionConditionalResidualBlock1d(nn.Module):
         # FiLM just modulates bias).
         use_film_scale_modulation: bool = False,
     ):
+        """
+        初始化一个带有条件调制的1D残差卷积块
+        
+        Args:
+            in_channels: 输入通道数
+            out_channels: 输出通道数
+            cond_dim: 条件向量的维度
+            kernel_size: 卷积核大小
+            n_groups: GroupNorm中的组数
+            use_film_scale_modulation: 是否使用FiLM的缩放调制(默认False只使用偏置调制)
+        """
         super().__init__()
 
+        # 是否使用FiLM的缩放调制
         self.use_film_scale_modulation = use_film_scale_modulation
+        # 保存输出通道数用于后续FiLM调制
         self.out_channels = out_channels
 
+        # 第一个卷积块(包含卷积、归一化和激活)
         self.conv1 = DiffusionConv1dBlock(in_channels, out_channels, kernel_size, n_groups=n_groups)
 
-        # FiLM modulation (https://arxiv.org/abs/1709.07871) outputs per-channel bias and (maybe) scale.
+        # FiLM调制(https://arxiv.org/abs/1709.07871)输出每个通道的偏置和(可能的)缩放参数
+        # 如果使用缩放调制,则输出通道数翻倍(一半用于缩放,一半用于偏置)
         cond_channels = out_channels * 2 if use_film_scale_modulation else out_channels
+        # 条件编码器,将条件向量映射到调制参数
         self.cond_encoder = nn.Sequential(nn.Mish(), nn.Linear(cond_dim, cond_channels))
 
+        # 第二个卷积块
         self.conv2 = DiffusionConv1dBlock(out_channels, out_channels, kernel_size, n_groups=n_groups)
 
         # A final convolution for dimension matching the residual (if needed).
+        # 用于维度匹配的残差连接卷积层(如果需要)
+        # 当输入输出通道数不匹配时,使用1x1卷积调整维度;否则使用恒等映射
         self.residual_conv = (
             nn.Conv1d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
         )
 
     def forward(self, x: Tensor, cond: Tensor) -> Tensor:
         """
+        前向传播函数
+        
         Args:
-            x: (B, in_channels, T)
-            cond: (B, cond_dim)
+            x: (B, in_channels, T) 输入特征
+            cond: (B, cond_dim) 条件向量
         Returns:
-            (B, out_channels, T)
+            (B, out_channels, T) 输出特征
         """
+        # 通过第一个卷积块
         out = self.conv1(x)
 
         # Get condition embedding. Unsqueeze for broadcasting to `out`, resulting in (B, out_channels, 1).
+        # 获取条件嵌入并扩展维度以便广播到`out`,结果形状为(B, out_channels, 1)
         cond_embed = self.cond_encoder(cond).unsqueeze(-1)
         if self.use_film_scale_modulation:
             # Treat the embedding as a list of scales and biases.
+            # 将嵌入视为缩放和偏置参数列表
+            # 前半部分作为缩放参数
             scale = cond_embed[:, : self.out_channels]
+            # 后半部分作为偏置参数
             bias = cond_embed[:, self.out_channels :]
+            # 应用FiLM调制: out = scale * out + bias
             out = scale * out + bias
         else:
             # Treat the embedding as biases.
+            # 仅将嵌入视为偏置参数
             out = out + cond_embed
 
+        # 通过第二个卷积块
         out = self.conv2(out)
+        # 添加残差连接
         out = out + self.residual_conv(x)
         return out

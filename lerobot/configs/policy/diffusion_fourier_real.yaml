@@ -5,15 +5,15 @@
 #       https://github.com/huggingface/lerobot/pull/134 for more details.
 
 seed: 100000
-dataset_repo_id: /mnt/sda/lerobot/data/fourier_pnp_coke
-dataset_root: /mnt/sda/lerobot/data/
+dataset_repo_id: /home/fourier/data/final/fourier_pnp_coke
+dataset_root: /home/fourier/data/final/
 
 hydra:
   run:
     # Set `dir` to where you would like to save all of the run outputs. If you run another training session
     # with the same value for `dir` its contents will be overwritten unless you set `resume` to true.
     # dir: outputs/train/${now:%Y-%m-%d}/${now:%H-%M-%S}_${env.name}_${policy.name}_${hydra.job.name}
-    dir: /mnt/sda/lerobot/models/${now:%m-%d-%H-%M}_${env.name}_diffusion_${hydra.job.name}
+    dir: /home/fourier/models/${now:%m-%d-%H-%M}_${env.name}_diffusion_${hydra.job.name}
   job:
     name: pnp_coke_arm_loss2_horizon64
 
@@ -62,7 +62,7 @@ training:
     enable: true
     # This is the maximum number of transforms (sampled from these below) that will be applied to each frame.
     # It's an integer in the interval [1, number of available transforms].
-    max_num_transforms: 999
+    max_num_transforms: 1
     # By default, transforms are applied in Torchvision's suggested order (shown below).
     # Set this to True to apply them in a random order.
     random_order: false
