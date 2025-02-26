@@ -1,0 +1,152 @@
+# @package _global_
+
+# Defaults for training for the PushT dataset as per https://github.com/real-stanford/diffusion_policy.
+# Note: We do not track EMA model weights as we discovered it does not improve the results. See
+#       https://github.com/huggingface/lerobot/pull/134 for more details.
+
+seed: 100000
+dataset_repo_id: /mnt/sda/lerobot/data/fourier_pnp_coke
+dataset_root: /mnt/sda/lerobot/data/
+
+hydra:
+  run:
+    # Set `dir` to where you would like to save all of the run outputs. If you run another training session
+    # with the same value for `dir` its contents will be overwritten unless you set `resume` to true.
+    # dir: outputs/train/${now:%Y-%m-%d}/${now:%H-%M-%S}_${env.name}_${policy.name}_${hydra.job.name}
+    dir: /mnt/sda/lerobot/models/debug/${now:%m-%d-%H-%M}_${env.name}_diffusion_${hydra.job.name}
+  job:
+    name: pnp_coke_arm_loss2_horizon64
+
+override_dataset_stats:
+  # TODO(rcadene, alexander-soare): should we remove image stats as well? do we use a pretrained vision model?
+  observation.image.left:
+    # stats from imagenet, since we use a pretrained vision model
+    mean: [[[0.485]], [[0.456]], [[0.406]]]  # (c,1,1)
+    std: [[[0.229]], [[0.224]], [[0.225]]]  # (c,1,1)
+  # observation.images.right:
+  #   # stats from imagenet, since we use a pretrained vision model
+  #   mean: [[[0.485]], [[0.456]], [[0.406]]]  # (c,1,1)
+  #   std: [[[0.229]], [[0.224]], [[0.225]]]  # (c,1,1)
+
+training:
+  offline_steps: 300000
+  online_steps: 0
+  eval_freq: -1
+  save_freq: 20000
+  save_checkpoint: true
+  max_checkpoints: 5
+
+  batch_size: 64
+  grad_clip_norm: 10
+  lr: 1.0e-4
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  adam_betas: [0.95, 0.999]
+  adam_eps: 1.0e-8
+  adam_weight_decay: 1.0e-6
+  online_steps_between_rollouts: 1
+
+  delta_timestamps:
+    observation.image.left: "[i / ${fps} for i in range(1 - ${policy.n_obs_steps}, 1)]"
+    # observation.images.right: "[i / ${fps} for i in range(1 - ${policy.n_obs_steps}, 1)]"
+    observation.state: "[i / ${fps} for i in range(1 - ${policy.n_obs_steps}, 1)]"
+    action: "[i / ${fps} for i in range(1 - ${policy.n_obs_steps}, 1 - ${policy.n_obs_steps} + ${policy.horizon})]"
+
+  # The original implementation doesn't sample frames for the last 7 steps,
+  # which avoids excessive padding and leads to improved training results.
+  drop_n_last_frames: 7  # ${policy.horizon} - ${policy.n_action_steps} - ${policy.n_obs_steps} + 1
+
+  image_transforms:
+    # The transform will be applied with the given probability, if weight is greater than 0. 
+    # If weight is 0, the transform will be applied with probability 1.
+    enable: true
+    # This is the maximum number of transforms (sampled from these below) that will be applied to each frame.
+    # It's an integer in the interval [1, number of available transforms].
+    max_num_transforms: 999
+    # By default, transforms are applied in Torchvision's suggested order (shown below).
+    # Set this to True to apply them in a random order.
+    random_order: false
+    brightness:
+      weight: 1
+      min_max: [0.9, 1.1]
+    contrast:
+      weight: 1
+      min_max: [0.9, 1.1]
+    saturation:
+      weight: 1
+      min_max: [0.9, 1.1]
+    hue:
+      weight: 1
+      min_max: [-0.05, 0.05]
+    # Custom transforms
+    custom_transforms:
+      GaussianBlur:
+        weight: 1
+        args:
+          kernel_size: [9, 9]
+          sigma: [0.1, 1.0]
+      # # Necessary for using Dino_v2 backbone
+      CenterCrop:
+        weight: -1
+        args:
+          size: [224, 224]
+
+eval:
+  n_episodes: 5
+  batch_size: 5
+
+policy:
+  name: scaledp #1 B size scaleDP, set scaledp_h tuo use a 410M - sized ScaleDP, to save memory.
+  model_size: ScaleDP_L
+
+  # Input / output structure.
+  n_obs_steps: 2
+  horizon: 64
+  n_action_steps: 8
+
+  input_shapes:
+    # TODO(rcadene, alexander-soare): add variables for height and width from the dataset/env?
+    observation.image.left: [3, 224, 224]
+    # observation.images.right: [3, 240, 400]
+    observation.state: ["${env.state_dim}"]
+  output_shapes:
+    action: ["${env.action_dim}"]
+
+  # Normalization / Unnormalization
+  input_normalization_modes:
+    observation.image.left: mean_std
+    # observation.images.right: mean_std
+    observation.state: mean_std
+  output_normalization_modes:
+    action: mean_std
+
+  vision_backbone: resnet50
+  crop_shape: [224, 224]
+  crop_is_random: True
+  pretrained_backbone_weights: null
+  use_group_norm: True
+  spatial_softmax_num_keypoints: 32
+
+  cond_dim: 1536
+  mlp_ratio: 4.0
+  time_as_cond: True
+  obs_as_cond: True
+  learn_sigma: True
+  noise_samples: 1
+  num_train_timesteps: 100
+  is_tinyvla: False
+
+  # Inference
+  num_inference_timesteps: 10  # if not provided, defaults to `num_train_timesteps`
+
+  # Loss computation
+  arm_loss_coeff: 2
+  hand_loss_coeff: 1
+  do_mask_loss_for_padding: false
+
+wandb:
+  enable: true
+  # Set to true to disable saving an artifact despite save_checkpoint == True
+  disable_artifact: true
+  project: debug
+  notes: ""

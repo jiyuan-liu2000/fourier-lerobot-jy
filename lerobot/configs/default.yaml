@@ -1,7 +1,7 @@
 defaults:
   - _self_
   - env: fourier_real
-  - policy: diffusion_fourier_real
+  - policy: scaledp_fourier_real
 
 hydra:
   run:

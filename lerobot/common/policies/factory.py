@@ -24,6 +24,7 @@ from lerobot.common.utils.utils import get_safe_torch_device
 
 def _policy_cfg_from_hydra_cfg(policy_cfg_class, hydra_cfg):
     expected_kwargs = set(inspect.signature(policy_cfg_class).parameters)
+    print(f'debug: need para:{expected_kwargs}')
     if not set(hydra_cfg.policy).issuperset(expected_kwargs):
         logging.warning(
             f"Hydra config is missing arguments: {set(expected_kwargs).difference(hydra_cfg.policy)}"
@@ -66,6 +67,11 @@ def get_policy_and_config_classes(name: str) -> tuple[Policy, object]:
         from lerobot.common.policies.vqbet.modeling_vqbet import VQBeTPolicy
 
         return VQBeTPolicy, VQBeTConfig
+    elif name == "scaledp":
+        from lerobot.common.policies.scaledp.configuration_scaledp import ScaleDPPolicyConfig
+        from lerobot.common.policies.scaledp.modeling_scaledp import ScaleDPPolicy
+
+        return ScaleDPPolicy, ScaleDPPolicyConfig
     else:
         raise NotImplementedError(f"Policy with name {name} is not implemented.")
 
@@ -93,6 +99,8 @@ def make_policy(
     policy_cls, policy_cfg_class = get_policy_and_config_classes(hydra_cfg.policy.name)
 
     policy_cfg = _policy_cfg_from_hydra_cfg(policy_cfg_class, hydra_cfg)
+    print(f'debug: states {dataset_stats}')
+    print(f'debug cfg: {policy_cfg}')
     if pretrained_policy_name_or_path is None:
         # Make a fresh policy.
         policy = policy_cls(policy_cfg, dataset_stats)
