@@ -108,3 +108,152 @@ JPEG压缩 (压缩后的字节数据)
 
 这些注释有助于理解扩散策略的工作原理，特别是其如何将视觉特征与状态信息结合，生成平滑的机器人动作轨迹。
 
+---
+#### 调试日志 (2025-02-28)
+
+进行上机测试，流程为初始位置上电，初始化后摆放至开始位置，然后进行测试。
+
+测试循环帧率为20Hz
+
+传输文件命令为：
+```bash
+scp -r root@192.168.1.100:/home/root/lerobot/data/ /home/wenjiawei/fourier-lerobot-jy/data/
+scp -2r 100000/  ubuntu@192.168.12.166:/mnt/sda/data/models/wjw_0304/
+```
+eval文件中关键代码为：
+```python
+
+def load_policy(policy_path, policy_mode="act"):
+    pretrained_policy_path = Path(policy_path)
+    if policy_mode == "act":
+        policy = ACTPolicy.from_pretrained(pretrained_policy_path)
+    elif policy_mode == "dp":
+        policy = DiffusionPolicy.from_pretrained(pretrained_policy_path)
+    else:
+        raise ValueError(
+            f"Invalid policy mode input: {policy_mode}, only act or dp mode support"
+        )
+    policy.n_action_steps = 8
+    policy.eval()
+    return policy
+
+
+if __name__ == "__main__":
+    # Load the pretrained policy
+    policy = load_policy(
+        "/mnt/sda/data/models/02-26-14-55_real_world_diffusion_pnp_coke_arm_loss2_horizon64/checkpoints/300000/pretrained_model",
+        policy_mode="dp",
+    )
+
+    # Check if GPU is available
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        print("GPU is available. Device set to:", device)
+    else:
+        device = torch.device("cpu")
+        print(
+            f"GPU is not available. Device set to: {device}. Inference will be slower than on GPU."
+        )
+
+    policy.to(device)
+    policy.reset()
+
+    # Initialize the GR2 player
+    cam = OakCamera(rgb_resolution=(640, 480), depth_resolution=(640, 480), fps=30)
+    player = GR1Player(
+        OmegaConf.load("controller/configs/gr1t2_upper_body.yaml"), camera=cam
+    )
+    # Move robot to the initial position
+    player.reset_robot()
+
+    step = 0
+    done = False
+    vis_img = True
+    try:
+        start_time = time.time()
+        while not done:
+            state, left_image = player.observe(mode="bimanual")
+            state = torch.from_numpy(state).to(torch.float32)
+            logging.debug(f"get observation img shape :{left_image.shape}")
+            logging.debug(f"get observation state shape :{state.shape}")
+
+            left_image = transform_image(left_image, crop_size=(224, 224))
+            logging.debug(f"input net img shape:{left_image.shape}")
+
+            if vis_img:
+                image_to_show = left_image.squeeze(0).to("cpu").numpy()
+            else:
+                image_to_show = None
+
+            # Send data tensors from CPU to GPU
+            state = state.to(device, non_blocking=True)
+            left_image = left_image.to(device, non_blocking=True)
+
+            # Add extra (empty) batch dimension, required to forward the policy
+            state = state.unsqueeze(0)
+            left_image = left_image.unsqueeze(0)
+
+            # Create the policy input dictionary
+            observation = {
+                "observation.state": state,
+                "observation.image.left": left_image,
+            }
+
+            # Predict the next action with respect to the current observation
+            with torch.inference_mode():
+                action = policy.select_action(observation)
+
+            # Prepare the action for the environment
+            numpy_action = action.squeeze(0).to("cpu").numpy()
+
+            # # Step through the environment and receive a new observation
+            if step < 2:
+                # Avoid sudden movements in the first few steps
+                player.step(numpy_action, image_to_show, mode="bimanual", time=0.5)
+            else:
+                player.step(numpy_action, image_to_show, mode="bimanual", time=0.0)
+
+            step += 1
+            # Calculate the frame rate
+            if step % 10 == 0:
+                elapsed_time = time.time() - start_time
+                frame_rate = step / elapsed_time
+                logging.info(f"Step: {step}, Frame Rate: {frame_rate:.2f} FPS")
+
+            # if step == 1000:
+            #     done = True
+    except Exception as e:
+        cam.close()
+        print(e)
+```
+
+后续改进：
+1. 明确帧率是否对执行效果有影响
+2. 列出在验证时可以调整的模型参数
+3. 明确select_action的输入输出与可调整参数
+4. 列出dp模型中可以调整的参数
+5. 执行场景与采集场景的差异等数据集问题排查
+
+
+#### 调试日志 (2025-03-03)
+
+需要测试上机推理的耗时
+
+可视化当前数据集命令：
+```bash
+python -m lerobot.scripts.visualize_dataset --config-path /home/fourier/data/final/fourier_pnp_coke/config.yaml --output-dir /home/fourier/data/final/fourier_pnp_coke/visualize
+```
+
+确认验证时模型的参数设置
+
+
+#### 调试日志 (2025-03-05)
+
+添加了使用训练数据测试现有模型的功能，测试对数据的拟合程度，对状态数据进行可视化对比
+
+增大bs与步数训练
+
+预计新增padding图像功能，用于去除背景干扰
+
+进一步可视化数据增强，确认其效果
+

@@ -49,7 +49,14 @@ from lerobot.common.utils.utils import (
     set_global_seed,
 )
 from lerobot.scripts.eval import eval_policy
+from torch.serialization import add_safe_globals
+from omegaconf.base import ContainerMetadata
 
+add_safe_globals([
+    ContainerMetadata,  # omegaconf 基础元数据类
+    ListConfig,         # omegaconf 列表配置类
+    DictConfig,        # omegaconf 字典配置类
+])
 
 def make_optimizer_and_scheduler(cfg, policy):
     if cfg.policy.name == "act":
@@ -282,6 +289,7 @@ def train(cfg: DictConfig, out_dir: str | None = None, job_name: str | None = No
         # Use the checkpoint config instead of the provided config (but keep `resume` parameter).
         cfg = checkpoint_cfg
         cfg.resume = True
+        logging.info(pformat(OmegaConf.to_container(cfg)))
     elif Logger.get_last_checkpoint_dir(out_dir).exists():
         raise RuntimeError(
             f"The configured output directory {Logger.get_last_checkpoint_dir(out_dir)} already exists. If "
@@ -344,7 +352,7 @@ def train(cfg: DictConfig, out_dir: str | None = None, job_name: str | None = No
 
     num_learnable_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
     num_total_params = sum(p.numel() for p in policy.parameters())
-    cfg.training.offline_steps = 300000
+    # cfg.training.offline_steps = 300000
     log_output_dir(out_dir)
     logging.info(f"{cfg.env.task=}")
     logging.info(f"{cfg.training.offline_steps=} ({format_big_number(cfg.training.offline_steps)})")

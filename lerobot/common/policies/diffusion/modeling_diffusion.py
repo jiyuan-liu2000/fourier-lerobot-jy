@@ -164,7 +164,7 @@ class DiffusionPolicy(
             # 将队列中的观察历史堆叠成批次
             batch = {k: torch.stack(list(self._queues[k]), dim=1) for k in batch if k in self._queues}
             # 使用扩散模型生成动作序列
-            actions = self.diffusion.generate_actions(batch)
+            actions = self.diffusion.generate_actions(batch) # actions (B, n_action_steps, )
             
             # 将生成的动作转换回原始范围
             actions = self.unnormalize_outputs({"action": actions})["action"]
@@ -185,12 +185,13 @@ class DiffusionPolicy(
         Returns:
             包含损失值的字典
         """
+        # import pdb; pdb.set_trace()
         # 对输入数据进行归一化
         batch = self.normalize_inputs(batch)
         # 处理多相机图像输入
         if len(self.expected_image_keys) > 0:
             batch = dict(batch)
-            batch["observation.images"] = torch.stack([batch[k] for k in self.expected_image_keys], dim=-4)
+            batch["observation.images"] = torch.stack([batch[k] for k in self.expected_image_keys], dim=-4) #batch["observation.images"].shape torch.Size([64, 2, 1, 3, 224, 224])
         # 对目标数据进行归一化
         batch = self.normalize_targets(batch)
         # 计算损失
@@ -657,7 +658,7 @@ class DiffusionRgbEncoder(nn.Module):
         Args:
             x: (B, C, H, W) image tensor with pixel values in [0, 1].
         Returns:
-            (B, D) image feature.
+            (B, D) image feature.    D = config.spatial_softmax_num_keypoints * 2
         """
         # Preprocess: maybe crop (if it was set up in the __init__).
         # 预处理:如果在__init__中设置了裁剪则进行裁剪
@@ -795,7 +796,7 @@ class DiffusionConditionalUnet1d(nn.Module):
         # just reverse these.
         # 定义UNet编码器每个下采样块的输入输出通道数,解码器则反转这些通道数
         in_out = [(config.output_shapes["action"][0], config.down_dims[0])] + list(
-            zip(config.down_dims[:-1], config.down_dims[1:], strict=True)
+            zip(config.down_dims[:-1], config.down_dims[1:], strict=True) # [(7, 128), (128, 256), (256, 512)]
         )
 
         # Unet encoder.
