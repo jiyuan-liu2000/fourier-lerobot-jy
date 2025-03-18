@@ -152,8 +152,13 @@ class DiffusionConfig:
     num_inference_steps: int | None = None
 
     # Loss computation
-    arm_loss_coeff: int | None = 2
-    hand_loss_coeff: int | None = 1
+    weight_mode: str = "uncertainty"
+    left_arm_loss_coeff: int | None = 1
+    right_arm_loss_coeff: int | None = 1
+    left_hand_loss_coeff: int | None = 1
+    right_hand_loss_coeff: int | None = 1
+    # arm_loss_coeff: int | None = 2
+    # hand_loss_coeff: int | None = 1
     do_mask_loss_for_padding: bool = False
 
     def __post_init__(self):

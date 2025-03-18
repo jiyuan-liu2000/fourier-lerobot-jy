@@ -1,4 +1,3 @@
-
  * @Author: WenJiawei
  * @Date: 2025-02-24 03:15:03
  * @LastEditors: WenJiawei
@@ -256,4 +255,298 @@ python -m lerobot.scripts.visualize_dataset --config-path /home/fourier/data/fin
 预计新增padding图像功能，用于去除背景干扰
 
 进一步可视化数据增强，确认其效果
+
+
+#### 调试日志 (2025-03-06)
+
+完成600k训练，测试结果，并于前面的结果进行对比
+
+测试padding图像功能，确认其效果
+
+确认测试推理时输入的数据维度与训练时是否需要一致，还是只需要一个时间步补一个图像与状态值即可
+
+
+#### 调试日志 (2025-03-12)
+
+观察到手部和手臂的误差量级不同，输入数据量纲也不一致，且在手臂部分出现验证的关节曲线变平的现象，考虑是loss与数据归一化的问题
+
+修改loss权重分配方式：使用不确定性自适应加权方式对手臂与手部误差加权训练，结果没有明显改善
+
+考虑是数据归一化的问题，尝试使用自定义的归一化方式。
+
+##### 当前数据归一化处理方式分析
+
+LeRobot框架中使用了两种归一化策略：均值标准差归一化和最小最大值归一化。这些策略在`normalize.py`中实现，主要包含两个类：
+1. `Normalize` - 用于对输入数据进行归一化
+2. `Unnormalize` - 用于对输出数据进行反归一化
+
+**归一化实现原理**：
+
+1. **均值标准差归一化 (mean_std)**:
+   ```python
+   # 归一化公式
+   normalized_data = (data - mean) / (std + 1e-8)
+   
+   # 反归一化公式
+   original_data = normalized_data * std + mean
+   ```
+
+2. **最小最大值归一化 (min_max)**:
+   ```python
+   # 归一化公式（映射到[-1, 1]范围）
+   normalized_data = (data - min) / (max - min + 1e-8)  # 先映射到[0, 1]
+   normalized_data = normalized_data * 2 - 1            # 再映射到[-1, 1]
+   
+   # 反归一化公式
+   original_data = (normalized_data + 1) / 2           # 先映射回[0, 1]
+   original_data = original_data * (max - min) + min   # 再映射回原始范围
+   ```
+
+**特殊处理**：
+- 对于图像数据，检测形状是否为`(c, h, w)`，并将统计量形状调整为`(c, 1, 1)`以保持通道维度归一化的同时忽略高度和宽度
+- 防止除以零：在除法操作中添加小常数`1e-8`
+- 统计量初始化为infinity，确保在使用前必须通过stats参数或load_state_dict更新
+
+**在DiffusionPolicy中的应用**：
+1. 在策略初始化时，根据数据集计算并存储归一化统计量
+   ```python
+   normalize = Normalize(
+       shapes={"observation.state": [state_dim], "observation.image.left": [3, H, W]},
+       modes={"observation.state": "mean_std", "observation.image.left": "min_max"},
+       stats=dataset_stats
+   )
+   ```
+
+2. 在前向传播时，输入数据先经过归一化处理
+   ```python
+   # 归一化输入
+   normalized_batch = self.normalize(batch)
+   ```
+
+3. 在生成动作后，通过反归一化还原为原始范围
+   ```python
+   # 反归一化输出
+   unnormalized_action = self.unnormalize({"action": action})["action"]
+   ```
+
+**当前问题分析**：
+1. 对于具有不同量级的关节（手臂与手部），统一的归一化策略可能无法处理好各部分的特性
+2. 手臂运动范围大，数据分布广，而手部运动范围小，数据更集中
+3. 使用mean_std归一化可能导致手部微小变化被过度放大，而手臂的大幅运动被压缩
+4. 在反归一化过程中，由于乘以不同的std，可能导致手部和手臂的误差被不同程度地放大
+
+**可能的改进方向**：
+1. 为手臂和手部分别设置不同的归一化策略或参数
+2. 考虑针对不同关节分组使用独立的归一化统计量
+3. 在归一化前应用预处理缩放，调整不同关节组的数据分布更加一致
+4. 探索其他归一化方法，如基于百分位数的归一化或自适应归一化
+
+##### 不同量纲数据的处理分析
+
+**当前数据特点**：
+1. 手臂关节数据：
+   - 单位：弧度（radians）
+   - 理论范围：[-π, π] 或 [-2π, 2π]
+   - 特点：周期性数据，连续性好
+
+2. 手部关节数据：
+   - 单位：原始读数
+   - 范围：[0, 10]
+   - 特点：线性范围，离散性较强
+
+**存在的问题**：
+1. 量纲不一致导致的训练偏差：
+   - 手臂弧度值通常在 ±3.14 范围内
+   - 手部读数在 0-10 范围内
+   - 直接使用 mean_std 归一化会导致不同比例的误差放大
+
+2. 数据特性差异：
+   - 手臂数据具有周期性，可能跨越 ±π 边界
+   - 手部数据是线性的，有明确的物理限位
+
+**建议的处理方案**：
+
+1. **预处理方案**：
+```python
+   # 手臂关节角度预处理
+   def preprocess_arm_joints(angles):
+       # 将弧度值映射到 sin 和 cos 分量
+       sin_vals = np.sin(angles)
+       cos_vals = np.cos(angles)
+       return np.concatenate([sin_vals, cos_vals], axis=-1)
+   
+   # 手部数据预处理
+   def preprocess_hand_joints(values):
+       # 线性归一化到 [-1, 1]
+       return (values / 10.0) * 2 - 1
+   ```
+
+2. **分组归一化方案**：
+   ```python
+   # 为不同组件使用不同的归一化策略
+   normalize = Normalize(
+       shapes={
+           "observation.arm_joints": [14],     # 7个关节 × 2 (sin/cos)
+           "observation.hand_joints": [12],    # 6个手指 × 2 (左右手)
+           "observation.image.left": [3, H, W]
+       },
+       modes={
+           "observation.arm_joints": "mean_std",
+           "observation.hand_joints": "min_max",
+           "observation.image.left": "min_max"
+       },
+       stats=dataset_stats
+   )
+   ```
+
+3. **自定义归一化类**：
+   ```python
+   class CustomNormalize(nn.Module):
+       def __init__(self):
+           super().__init__()
+           
+       def normalize_arm(self, angles):
+           # 处理周期性数据
+           sin_cos = preprocess_arm_joints(angles)
+           return self.normalize_mean_std(sin_cos)
+           
+       def normalize_hand(self, values):
+           # 处理线性范围数据
+           return preprocess_hand_joints(values)
+           
+       def forward(self, batch):
+           batch = dict(batch)
+           batch["arm_joints"] = self.normalize_arm(batch["arm_joints"])
+           batch["hand_joints"] = self.normalize_hand(batch["hand_joints"])
+           return batch
+   ```
+
+
+##### 变化范围差异的处理分析
+
+从当前数据的可视化结果可以观察到：
+1. 手臂关节：
+   - 变化范围小（大多在 ±0.5 弧度内）
+   - 变化平滑，连续性好
+   - 部分关节几乎保持不变
+
+2. 手部关节：
+   - 变化范围大（从 0 到 10）
+   - 变化剧烈，有明显的开合动作
+   - 多个手指同步运动
+
+**直接最大最小归一化的问题**：
+1. **信号强度失真**：
+   ```python
+   # 考虑两组数据
+   arm_data = [0.1, 0.12, 0.15]  # 变化范围 0.05
+   hand_data = [2.0, 5.0, 8.0]   # 变化范围 6.0
+   
+   # 直接最大最小归一化后
+   norm_arm = [-1, 0, 1]    # 小的变化被放大
+   norm_hand = [-1, 0, 1]   # 大的变化被压缩
+   ```
+
+2. **噪声敏感性**：
+   - 对于手臂这样变化小的信号，微小的噪声会被显著放大
+   - 可能导致模型对手臂位置的预测不稳定
+
+3. **梯度不平衡**：
+   - 手臂小范围变化产生大梯度
+   - 手部大范围变化产生小梯度
+   - 可能影响模型训练的收敛性
+
+**建议的改进方案**：
+
+1. **基于变化范围的缩放**：
+   ```python
+   def scale_by_movement_range(data, threshold=0.1):
+       movement_range = np.max(data) - np.min(data)
+       if movement_range < threshold:
+           # 对于变化小的信号，使用较小的缩放范围
+           return (data - np.mean(data)) / (movement_range + 1e-8) * 0.2
+       else:
+           # 对于变化大的信号，使用标准的归一化范围
+           return (data - np.min(data)) / (movement_range + 1e-8) * 2 - 1
+   ```
+
+2. **相对变化归一化**：
+   ```python
+   def normalize_relative_change(data):
+       # 计算相对于初始位置的变化
+       base = data[0]
+       relative_change = (data - base) / (np.abs(base) + 1e-8)
+       # 将相对变化映射到合适范围
+       return np.tanh(relative_change)  # 使用tanh限制在[-1,1]范围内
+   ```
+
+3. **分段线性映射**：
+   ```python
+   def piecewise_linear_normalize(data, thresholds=[0.1, 1.0, 5.0]):
+       abs_changes = np.abs(data - np.mean(data))
+       max_change = np.max(abs_changes)
+       
+       if max_change < thresholds[0]:
+           # 小变化区间，使用较大斜率
+           scale = 0.5 / thresholds[0]
+       elif max_change < thresholds[1]:
+           # 中等变化区间，使用中等斜率
+           scale = 0.3 / thresholds[1]
+       else:
+           # 大变化区间，使用较小斜率
+           scale = 0.2 / thresholds[2]
+           
+       return data * scale
+   ```
+
+**实现建议**：
+
+1. **手臂关节处理**：
+   - 保持原始变化比例，不进行最大最小归一化
+   - 使用相对变化归一化，关注位置变化而不是绝对位置
+   - 考虑使用较小的映射范围（如[-0.2, 0.2]）避免过度放大
+
+2. **手部关节处理**：
+   - 使用分段线性映射，处理不同幅度的变化
+   - 保持开合动作的相对关系
+   - 可以使用较大的映射范围（如[-0.8, 0.8]）保留动作特征
+
+3. **组合策略**：
+   ```python
+   class AdaptiveNormalize(nn.Module):
+       def __init__(self, arm_scale=0.2, hand_scale=0.8):
+           super().__init__()
+           self.arm_scale = arm_scale
+           self.hand_scale = hand_scale
+           
+       def normalize_arm(self, angles):
+           # 对手臂使用较小的映射范围
+           relative_changes = angles - angles.mean(dim=0, keepdim=True)
+           return torch.tanh(relative_changes) * self.arm_scale
+           
+       def normalize_hand(self, values):
+           # 对手部使用较大的映射范围
+           return torch.tanh((values - 5.0) / 5.0) * self.hand_scale
+   ```
+
+这种方案的优势：
+1. 保持信号的原始变化特性
+2. 减少归一化导致的噪声放大
+3. 平衡不同部位的梯度贡献
+4. 提高模型对小变化的敏感度
+
+通过这种方式，我们可以更好地处理手臂和手部的不同变化特性，避免简单归一化带来的问题。
+
+
+#### 调试日志 (2025-03-14)
+
+改动1：修改图片裁剪尺寸，从224x224改为112x112
+
+改动2：修改loss加权方式，使用不确定性自适应加权方式对手臂与手部误差加权训练
+
+改动3：修改数据预处理时的归一化方式，手臂和手部采用不同的归一化范围
+
+新增AdaptiveNormalize类，用于对不同类型的关节使用不同的归一化缩放范围
+
+
 

@@ -134,6 +134,7 @@ class Normalize(nn.Module):
     def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
         batch = dict(batch)  # shallow copy avoids mutating the input batch
         for key, mode in self.modes.items():
+            import pdb; pdb.set_trace()
             buffer = getattr(self, "buffer_" + key.replace(".", "_"))
 
             if mode == "mean_std":
@@ -217,4 +218,167 @@ class Unnormalize(nn.Module):
                 batch[key] = batch[key] * (max - min) + min
             else:
                 raise ValueError(mode)
+        return batch
+
+
+class AdaptiveNormalize(nn.Module):
+    """
+    对不同类型的关节（如手臂和手部）使用不同归一化缩放范围的归一化器。
+    这有助于解决不同关节类型数据量级和运动特性差异的问题。
+    """
+
+    def __init__(
+        self,
+        shapes: dict[str, list[int]],
+        modes: dict[str, str],
+        stats: dict[str, dict[str, Tensor]] | None = None,
+        joint_groups: dict[str, list[int]] | None = None,
+        scaling_factors: dict[str, float] | None = None,
+    ):
+        """
+        Args:
+            shapes: 与Normalize类相同，表示输入模态的形状。
+            modes: 与Normalize类相同，表示归一化模式。
+            stats: 与Normalize类相同，存储统计数据。
+            joint_groups: 关节分组信息，如{"arm": [0, 1, 2, 3, 4, 5, 6], "hand": [7, 8, 9, 10, 11, 12]}。
+                如果为None，则使用常规归一化。
+            scaling_factors: 每个关节组的缩放因子，如{"arm": 0.5, "hand": 0.8}。
+                如果为None，则使用默认缩放因子1.0。
+        """
+        super().__init__()
+        self.shapes = shapes
+        self.modes = modes
+        self.stats = stats
+        self.joint_groups = joint_groups or {}
+        self.scaling_factors = scaling_factors or {}
+        
+        # 创建常规归一化器的缓冲区
+        stats_buffers = create_stats_buffers(shapes, modes, stats)
+        for key, buffer in stats_buffers.items():
+            setattr(self, "buffer_" + key.replace(".", "_"), buffer)
+    
+    @torch.no_grad
+    def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+        batch = dict(batch)  # 浅拷贝避免修改输入批次
+        for key, mode in self.modes.items():
+            buffer = getattr(self, "buffer_" + key.replace(".", "_"))
+            
+            # 检查是否是动作数据且需要分组归一化
+            if key == "action" and self.joint_groups and key in batch:
+                # 进行常规归一化
+                if mode == "mean_std":
+                    mean = buffer["mean"]
+                    std = buffer["std"]
+                    assert not torch.isinf(mean).any(), _no_stats_error_str("mean")
+                    assert not torch.isinf(std).any(), _no_stats_error_str("std")
+                    normalized = (batch[key] - mean) / (std + 1e-8)
+                elif mode == "min_max":
+                    min = buffer["min"]
+                    max = buffer["max"]
+                    assert not torch.isinf(min).any(), _no_stats_error_str("min")
+                    assert not torch.isinf(max).any(), _no_stats_error_str("max")
+                    normalized = (batch[key] - min) / (max - min + 1e-8)
+                    normalized = normalized * 2 - 1
+                
+                # 对不同关节组应用不同的缩放因子
+                result = normalized.clone()
+                for group_name, indices in self.joint_groups.items():
+                    scale_factor = self.scaling_factors.get(group_name, 1.0)
+                    result[..., indices] = normalized[..., indices] * scale_factor
+                
+                batch[key] = result
+            else:
+                # 对其他数据使用常规归一化
+                if mode == "mean_std":
+                    mean = buffer["mean"]
+                    std = buffer["std"]
+                    assert not torch.isinf(mean).any(), _no_stats_error_str("mean")
+                    assert not torch.isinf(std).any(), _no_stats_error_str("std")
+                    batch[key] = (batch[key] - mean) / (std + 1e-8)
+                elif mode == "min_max":
+                    min = buffer["min"]
+                    max = buffer["max"]
+                    assert not torch.isinf(min).any(), _no_stats_error_str("min")
+                    assert not torch.isinf(max).any(), _no_stats_error_str("max")
+                    batch[key] = (batch[key] - min) / (max - min + 1e-8)
+                    batch[key] = batch[key] * 2 - 1
+                else:
+                    raise ValueError(mode)
+        return batch
+
+
+class AdaptiveUnnormalize(nn.Module):
+    """
+    与AdaptiveNormalize配对使用的反归一化类。
+    """
+
+    def __init__(
+        self,
+        shapes: dict[str, list[int]],
+        modes: dict[str, str],
+        stats: dict[str, dict[str, Tensor]] | None = None,
+        joint_groups: dict[str, list[int]] | None = None,
+        scaling_factors: dict[str, float] | None = None,
+    ):
+        """
+        参数与AdaptiveNormalize相同。
+        """
+        super().__init__()
+        self.shapes = shapes
+        self.modes = modes
+        self.stats = stats
+        self.joint_groups = joint_groups or {}
+        self.scaling_factors = scaling_factors or {}
+        
+        # 创建常规反归一化器的缓冲区
+        stats_buffers = create_stats_buffers(shapes, modes, stats)
+        for key, buffer in stats_buffers.items():
+            setattr(self, "buffer_" + key.replace(".", "_"), buffer)
+    
+    @torch.no_grad
+    def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+        batch = dict(batch)  # 浅拷贝避免修改输入批次
+        for key, mode in self.modes.items():
+            buffer = getattr(self, "buffer_" + key.replace(".", "_"))
+            
+            # 检查是否是动作数据且需要分组反归一化
+            if key == "action" and self.joint_groups and key in batch:
+                # 首先反向应用缩放因子
+                unnormalized = batch[key].clone()
+                for group_name, indices in self.joint_groups.items():
+                    scale_factor = self.scaling_factors.get(group_name, 1.0)
+                    if scale_factor != 0:  # 避免除以零
+                        unnormalized[..., indices] = batch[key][..., indices] / scale_factor
+                
+                # 然后进行常规反归一化
+                if mode == "mean_std":
+                    mean = buffer["mean"]
+                    std = buffer["std"]
+                    assert not torch.isinf(mean).any(), _no_stats_error_str("mean")
+                    assert not torch.isinf(std).any(), _no_stats_error_str("std")
+                    batch[key] = unnormalized * std + mean
+                elif mode == "min_max":
+                    min = buffer["min"]
+                    max = buffer["max"]
+                    assert not torch.isinf(min).any(), _no_stats_error_str("min")
+                    assert not torch.isinf(max).any(), _no_stats_error_str("max")
+                    unnormalized = (unnormalized + 1) / 2
+                    batch[key] = unnormalized * (max - min) + min
+            else:
+                # 对其他数据使用常规反归一化
+                if mode == "mean_std":
+                    mean = buffer["mean"]
+                    std = buffer["std"]
+                    assert not torch.isinf(mean).any(), _no_stats_error_str("mean")
+                    assert not torch.isinf(std).any(), _no_stats_error_str("std")
+                    batch[key] = batch[key] * std + mean
+                elif mode == "min_max":
+                    min = buffer["min"]
+                    max = buffer["max"]
+                    assert not torch.isinf(min).any(), _no_stats_error_str("min")
+                    assert not torch.isinf(max).any(), _no_stats_error_str("max")
+                    batch[key] = (batch[key] + 1) / 2
+                    batch[key] = batch[key] * (max - min) + min
+                else:
+                    raise ValueError(mode)
         return batch

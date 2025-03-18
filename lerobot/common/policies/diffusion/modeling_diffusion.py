@@ -35,7 +35,7 @@ from huggingface_hub import PyTorchModelHubMixin
 from torch import Tensor, nn
 
 from lerobot.common.policies.diffusion.configuration_diffusion import DiffusionConfig
-from lerobot.common.policies.normalize import Normalize, Unnormalize
+from lerobot.common.policies.normalize import Normalize, Unnormalize, AdaptiveNormalize, AdaptiveUnnormalize
 from lerobot.common.policies.utils import (
     get_device_from_parameters,
     get_dtype_from_parameters,
@@ -43,7 +43,7 @@ from lerobot.common.policies.utils import (
 )
 
 from lerobot.common.vision.dinov2 import DINOv2BackBone
-from lerobot.common.vision.img_crop import SquareCenterCropAndResize
+from lerobot.common.vision.img_crop import SquareCenterCropAndResize, RoiCropAndResize
 
 class DiffusionPolicy(
     nn.Module,  # 继承PyTorch的基础模块类
@@ -74,27 +74,72 @@ class DiffusionPolicy(
         if config is None:
             config = DiffusionConfig()  # 如果未提供配置，使用默认配置
         self.config = config
-        
+
+        # 1. 定义关节分组
+        joint_groups = {
+            "left_arm": [0, 1, 2, 3, 4, 5, 6],       # 左臂关节索引
+            "right_arm": [7, 8, 9, 10, 11, 12, 13],  # 右臂关节索引
+            "left_hand": [14, 15, 16, 17, 18, 19],   # 左手关节索引
+            "right_hand": [20, 21, 22, 23, 24, 25]   # 右手关节索引
+        }
+
+        # 2. 定义缩放因子 - 手臂使用较小的缩放因子，手部使用较大的缩放因子
+        scaling_factors = {
+            "left_arm": 0.4,
+            "right_arm": 0.4,
+            "left_hand": 0.9,
+            "right_hand": 0.9
+        }
+
+        # 3. 创建自适应归一化器
+        self.normalize_inputs = AdaptiveNormalize(
+            shapes=config.input_shapes, 
+            modes=config.input_normalization_modes,
+            stats=dataset_stats,
+            joint_groups=joint_groups,
+            scaling_factors=scaling_factors
+        )
+
+        self.normalize_targets = AdaptiveNormalize(
+            shapes=config.output_shapes, 
+            modes=config.output_normalization_modes,
+            stats=dataset_stats,
+            joint_groups=joint_groups,
+            scaling_factors=scaling_factors
+        )
+
+        # 4. 创建自适应反归一化器
+        self.unnormalize_outputs = AdaptiveUnnormalize(
+            shapes=config.output_shapes,
+            modes=config.output_normalization_modes,
+            stats=dataset_stats,
+            joint_groups=joint_groups,
+            scaling_factors=scaling_factors
+        )
+
+
+
+        ######### 原归一化
         # 创建输入数据归一化器
-        self.normalize_inputs = Normalize(
-            config.input_shapes,  # 输入数据的形状字典
-            config.input_normalization_modes,  # 归一化模式字典
-            dataset_stats  # 数据集统计信息
-        )
+        # self.normalize_inputs = Normalize(
+        #     config.input_shapes,  # 输入数据的形状字典
+        #     config.input_normalization_modes,  # 归一化模式字典
+        #     dataset_stats  # 数据集统计信息
+        # )
         
-        # 创建目标数据归一化器
-        self.normalize_targets = Normalize(
-            config.output_shapes,  # 输出数据的形状字典
-            config.output_normalization_modes,  # 归一化模式字典
-            dataset_stats  # 数据集统计信息
-        )
+        # # 创建目标数据归一化器
+        # self.normalize_targets = Normalize(
+        #     config.output_shapes,  # 输出数据的形状字典
+        #     config.output_normalization_modes,  # 归一化模式字典
+        #     dataset_stats  # 数据集统计信息
+        # )
         
-        # 创建输出数据反归一化器
-        self.unnormalize_outputs = Unnormalize(
-            config.output_shapes,
-            config.output_normalization_modes,
-            dataset_stats
-        )
+        # # 创建输出数据反归一化器
+        # self.unnormalize_outputs = Unnormalize(
+        #     config.output_shapes,
+        #     config.output_normalization_modes,
+        #     dataset_stats
+        # )
 
         # queues are populated during rollout of the policy, they contain the n latest observations and actions
         # 队列在策略执行过程中填充，包含最新的n个观察和动作
@@ -169,9 +214,10 @@ class DiffusionPolicy(
             # 将生成的动作转换回原始范围
             actions = self.unnormalize_outputs({"action": actions})["action"]
             
-            # 将动作序列添加到队列中
+            actions = actions[:,self.config.n_action_steps//2:]
+            # import pdb; pdb.set_trace()     # 将动作序列添加到队列中
             self._queues["action"].extend(actions.transpose(0, 1))
-
+  
         # 返回队列中的下一个动作
         action = self._queues["action"].popleft()
         return action
@@ -462,11 +508,47 @@ class DiffusionModel(nn.Module):
 
         loss = F.mse_loss(pred, target, reduction="none")
 
-        # 通过系数控制机械臂和灵巧手的损失比例
-        coeffs = torch.ones(loss.shape[-1], device=loss.device)
-        coeffs[:14] = 2  # 机械臂部分的损失权重
-        coeffs[14:] = 1  # 灵巧手部分的损失权重
-        loss = loss * coeffs
+        # 根据配置选择权重计算方式
+        if not hasattr(self.config, 'weight_mode'):
+            self.config.weight_mode = 'fixed'  # 默认使用固定权重
+            
+        if self.config.weight_mode == 'uncertainty':
+            # 使用不确定性权重
+            if not hasattr(self, 'log_vars'):
+                # 初始化四个可学习的对数方差参数
+                self.log_vars = nn.Parameter(torch.zeros(4, device=loss.device))
+            
+            # 基于不确定性计算自适应权重
+            precision_left_arm = torch.exp(-self.log_vars[0])
+            precision_right_arm = torch.exp(-self.log_vars[1]) 
+            precision_left_hand = torch.exp(-self.log_vars[2])
+            precision_right_hand = torch.exp(-self.log_vars[3])
+            
+            # 更新损失权重系数
+            coeffs = torch.ones(loss.shape[-1], device=loss.device)
+            coeffs[:7] = precision_left_arm  # 左臂
+            coeffs[7:14] = precision_right_arm  # 右臂
+            coeffs[14:20] = precision_left_hand  # 左手
+            coeffs[20:] = precision_right_hand  # 右手
+            
+            # 应用权重到损失
+            loss = loss * coeffs.unsqueeze(0)
+            
+            # 添加正则化项防止权重趋于无穷
+            reg_loss = 0.5 * (self.log_vars[0] + self.log_vars[1] + 
+                             self.log_vars[2] + self.log_vars[3])
+            loss = loss + reg_loss
+            
+        else:
+            # 使用固定权重
+            coeffs = torch.ones(loss.shape[-1], device=loss.device)
+            coeffs[:7] = self.config.left_arm_loss_coeff  # 左臂
+            coeffs[7:14] = self.config.right_arm_loss_coeff            
+            coeffs[14:20] = self.config.left_hand_loss_coeff  # 左手
+            coeffs[20:] = self.config.right_hand_loss_coeff  # 右手
+            
+            # 应用权重到损失
+            loss = loss * coeffs.unsqueeze(0)
 
         # 对填充的动作部分进行掩码（数据集轨迹边缘）
         if self.config.do_mask_loss_for_padding:
@@ -581,7 +663,8 @@ class DiffusionRgbEncoder(nn.Module):
             self.do_crop = True
             # Always use center crop for eval
             # 评估时始终使用中心裁剪
-            self.center_crop = SquareCenterCropAndResize(config.crop_shape)
+            # self.center_crop = SquareCenterCropAndResize(config.crop_shape)
+            self.center_crop = RoiCropAndResize(config.crop_shape, [0, 112, 224, 224])
             # if config.resize_crop:
             #     self.center_crop = SquareCenterCropAndResize(config.crop_shape)
             # else:
@@ -665,7 +748,21 @@ class DiffusionRgbEncoder(nn.Module):
         if self.do_crop:
             if self.training:  # noqa: SIM108
                 # 训练时使用可能的随机裁剪
+                # import pdb; pdb.set_trace() 
                 x = self.maybe_random_crop(x)
+
+                # import matplotlib.pyplot as plt 
+                # # 可视化裁剪后的图像
+                # if x.shape[0] > 0:  # 确保batch不为空
+                #     for i in range(min(x.shape[0], 4)):  # 最多显示4张图片
+                #         img = x[i].detach().cpu()  # (C,H,W)
+                #         img = img.permute(1,2,0)  # 转换为(H,W,C)用于显示
+                #         plt.figure()  # 保持224:112的原始比例
+                #         plt.imshow(img)  # 直接显示原始图像
+                #         plt.axis('off')
+                #         plt.title(f'Cropped Image {i}')
+                #         plt.show()
+                #         plt.close()
             else:
                 # Always use center crop for eval.
                 # 评估时始终使用中心裁剪

@@ -1,8 +1,8 @@
 '''
 Author: Jiyuan Liu
 Date: 2025-01-17 11:26:33
-LastEditors: Jiyuan Liu
-LastEditTime: 2025-02-10 20:21:53
+LastEditors: WenJiawei
+LastEditTime: 2025-03-10 16:29:12
 FilePath: /fourier-lerobot-jy/lerobot/common/vision/dinov2.py
 Description: 
 
@@ -23,8 +23,10 @@ class DINOv2BackBone(nn.Module):
     def forward(self, tensor):
         # dinov2 patch size 16, the input tensor size should be divisible by 16
         xs = self.body.forward_features(tensor)["x_norm_patchtokens"]
+        # import pdb; pdb.set_trace() 
         od = OrderedDict()
-        od["0"] = xs.reshape(xs.shape[0], 16, 16, 384).permute(0, 3, 2, 1)
+        # od["0"] = xs.reshape(xs.shape[0], 16, 8, 384).permute(0, 3, 2, 1)
+        od["0"] = xs.reshape(xs.shape[0], 8, 16, 384).permute(0, 3, 2, 1)
         # return od
         return {"feature_map": od["0"]}
     

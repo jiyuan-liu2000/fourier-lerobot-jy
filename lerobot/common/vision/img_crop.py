@@ -2,7 +2,7 @@
 Author: Jiyuan Liu
 Date: 2025-02-08 17:59:27
 LastEditors: WenJiawei
-LastEditTime: 2025-03-05 17:10:37
+LastEditTime: 2025-03-10 14:56:24
 FilePath: /fourier-lerobot-jy/lerobot/common/vision/img_crop.py
 Description: 
 
@@ -78,3 +78,33 @@ class SquarePadAndResize(object):
             return resized
         else:
             raise ValueError("input tensor must be 3D or 4D tensor")
+        
+class RoiCropAndResize(object):
+    """直接裁剪ROI区域并resize到指定尺寸。
+    
+    Args:
+        target_size: 目标尺寸,可以是int或tuple
+        roi: ROI区域坐标 [x1, y1, x2, y2]
+    """
+    def __init__(self, target_size, roi):
+        if isinstance(target_size, int):
+            self.target_size = (target_size, target_size)
+        else:
+            self.target_size = target_size
+        # 手动设定ROI区域坐标 [x1, y1, x2, y2]
+        self.roi = roi # 默认裁剪左上角224x112的区域
+
+    def __call__(self, x):
+        if x.dim() == 3:
+            x1, y1, x2, y2 = self.roi
+            cropped = x[:, y1:y2, x1:x2]
+            cropped = cropped.unsqueeze(0)
+            resized = F.interpolate(cropped, size=self.target_size, mode='bicubic', align_corners=False)
+            return resized.squeeze(0)
+        elif x.dim() == 4:
+            x1, y1, x2, y2 = self.roi
+            cropped = x[:, :, y1:y2, x1:x2]
+            resized = F.interpolate(cropped, size=self.target_size, mode='bicubic', align_corners=False)
+            return resized
+        else:
+            raise ValueError("输入张量必须是3D或4D张量")

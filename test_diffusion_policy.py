@@ -23,6 +23,7 @@ import hydra
 from hydra import compose, initialize
 from pprint import pformat
 import sys
+import matplotlib.cm as cm
 
 from lerobot.common.policies.diffusion.modeling_diffusion import DiffusionPolicy
 
@@ -50,6 +51,8 @@ def generate_random_state(state_dim=7):
 def load_policy(policy_path):
     """Load pretrained policy"""
     policy = DiffusionPolicy.from_pretrained(policy_path)
+    policy.n_action_steps = 64
+    print(f"{policy.n_action_steps=}")
     policy.eval()  # Set to evaluation mode
     return policy
 
@@ -176,7 +179,168 @@ def load_dataset(repo_id: str, root: str, episode_idx: int = 0):
     
     return dataset, indices
 
-def test_with_dataset(policy, dataset, indices, device, output_dir, episode_idx):
+def visualize_step_data(image, state, action=None, target_action=None, step=0, episode_idx=0, state_history=None, action_history=None):
+    """Visualize current step's input data and actions in a single window"""
+    # Convert image tensor to numpy array for visualization
+    if torch.is_tensor(image):
+        image = image.cpu().numpy()
+    if image.shape[0] == 3:
+        image = np.transpose(image, (1, 2, 0))
+    
+    # 获取最大维度以决定颜色数量
+    max_dims = max(
+        len(state_history['values'][0]) if state_history else 0,
+        len(action_history['predicted'][0]) if action_history else 0
+    )
+    colors = cm.tab20(np.linspace(0, 1, max_dims))
+    
+    # 定义关节名称
+    left_arm_joints = ["L shoulder pitch", "L shoulder roll", "L shoulder yaw", 
+                       "L elbow pitch", "L elbow yaw", "L wrist pitch", "L wrist roll"]
+    right_arm_joints = ["R shoulder pitch", "R shoulder roll", "R shoulder yaw", 
+                        "R elbow pitch", "R elbow yaw", "R wrist pitch", "R wrist roll"]
+    left_hand_joints = ["L thumb", "L index", "L middle", "L ring", "L pinky", "L thumb lateral"]
+    right_hand_joints = ["R thumb", "R index", "R middle", "R ring", "R pinky", "R thumb lateral"]
+    
+    joint_names = left_arm_joints + right_arm_joints + left_hand_joints + right_hand_joints
+    
+    # Create figure with subplots
+    plt.clf()
+    fig = plt.gcf()
+    fig.set_size_inches(24, 12)
+    
+    # Create grid for subplots with adjusted ratios
+    gs = plt.GridSpec(3, 2, 
+                     height_ratios=[1.2, 1.2, 1.2],
+                     width_ratios=[1.2, 2.5],
+                     hspace=0.3,
+                     wspace=0.3)
+    
+    # Plot image and current action comparison on the left
+    ax1 = plt.subplot(gs[0, 0])
+    ax1.imshow(image)
+    ax1.set_title(f"Input Image\n(Episode {episode_idx}, Step {step})", pad=10)
+    ax1.axis('off')
+    
+    # Plot current action comparison below image
+    if action is not None and target_action is not None:
+        ax2 = plt.subplot(gs[1:, 0])
+        action_np = action.cpu().numpy() if torch.is_tensor(action) else action
+        target_np = target_action.cpu().numpy() if torch.is_tensor(target_action) else target_action
+        
+        x = np.arange(len(action_np))
+        width = 0.35
+        
+        # 计算误差
+        error = np.abs(action_np - target_np)
+        
+        # 绘制柱状图
+        pred_bars = ax2.bar(x - width/2, action_np, width, label='Current Predicted', color='royalblue')
+        target_bars = ax2.bar(x + width/2, target_np, width, label='Current Target', color='darkorange')
+        
+        # 为每个关节添加误差值标注
+        for i, (pred, target, err) in enumerate(zip(action_np, target_np, error)):
+            # 确定标注位置（较高的柱子上方）
+            y_pos = max(pred, target) + 0.1
+            
+            # 设置标注格式（误差较大的用红色）
+            color = 'red' if err > np.percentile(error, 75) else 'black'
+            fontweight = 'bold' if err > np.percentile(error, 75) else 'normal'
+            
+            # 添加标注
+            ax2.annotate(f"{err:.2f}",
+                        xy=(i, y_pos),
+                        ha='center',
+                        va='bottom',
+                        fontsize=7,
+                        color=color,
+                        fontweight=fontweight)
+        
+        # 标记关节名称
+        if len(action_np) <= 10:  # 如果关节较少，直接显示全部标签
+            ax2.set_xticks(x)
+            ax2.set_xticklabels([f"{i}" for i in range(len(action_np))], rotation=45, ha="right")
+        else:  # 如果关节较多，只显示主要关节
+            key_indices = [0, 7, 14, 20]  # 左臂开始、右臂开始、左手开始、右手开始
+            ax2.set_xticks(key_indices)
+            ax2.set_xticklabels(["L Arm", "R Arm", "L Hand", "R Hand"], rotation=45, ha="right")
+            
+            # 添加垂直线分隔不同组件
+            for idx in key_indices[1:]:
+                ax2.axvline(x=idx-0.5, color='gray', linestyle='--', alpha=0.5)
+        
+        # 标记误差最大的关节
+        top_errors = np.argsort(error)[-3:]  # 获取误差最大的3个关节
+        for i in top_errors:
+            ax2.annotate(f"{joint_names[i]}",
+                        xy=(i, max(action_np[i], target_np[i]) + 0.3),
+                        xytext=(0, 10),
+                        textcoords="offset points",
+                        ha='center',
+                        fontsize=8,
+                        bbox=dict(boxstyle="round,pad=0.3", fc="yellow", alpha=0.7))
+        
+        ax2.set_title("Current Step\nAction Comparison", pad=10)
+        ax2.set_xlabel("Action Dimension")
+        ax2.set_ylabel("Value")
+        ax2.legend()
+        ax2.grid(True)
+    
+    # Plot state history with adjusted height
+    ax3 = plt.subplot(gs[0, 1])
+    if state_history is not None:
+        for i in range(len(state_history['values'][0])):
+            ax3.plot(state_history['steps'], 
+                    [states[i] for states in state_history['values']], 
+                    label=f'State {i}',
+                    color=colors[i % len(colors)])
+    ax3.set_title("State History", pad=10)
+    ax3.set_xlabel("Time Steps")
+    ax3.set_ylabel("State Value")
+    ax3.legend(bbox_to_anchor=(1.02, 1), loc='upper left', ncol=2)
+    ax3.grid(True)
+    
+    # Plot predicted action history
+    ax4 = plt.subplot(gs[1, 1])
+    if action_history is not None:
+        for i in range(len(action_history['predicted'][0])):
+            label = joint_names[i] if i < len(joint_names) else f'Action {i}'
+            ax4.plot(action_history['steps'],
+                    [actions[i] for actions in action_history['predicted']],
+                    label=label,
+                    color=colors[i % len(colors)])
+    ax4.set_title("Predicted Action History", pad=10)
+    ax4.set_xlabel("Time Steps")
+    ax4.set_ylabel("Action Value")
+    ax4.legend(bbox_to_anchor=(1.02, 1), loc='upper left', ncol=2)
+    ax4.grid(True)
+    
+    # Plot target action history
+    ax5 = plt.subplot(gs[2, 1])
+    if action_history is not None:
+        for i in range(len(action_history['target'][0])):
+            label = joint_names[i] if i < len(joint_names) else f'Action {i}'
+            ax5.plot(action_history['steps'],
+                    [actions[i] for actions in action_history['target']],
+                    label=label,
+                    color=colors[i % len(colors)])
+    ax5.set_title("Target Action History", pad=10)
+    ax5.set_xlabel("Time Steps")
+    ax5.set_ylabel("Action Value")
+    ax5.legend(bbox_to_anchor=(1.02, 1), loc='upper left', ncol=2)
+    ax5.grid(True)
+    
+    # Align the x-axes of all history plots
+    if action_history is not None:
+        xlim = (min(action_history['steps']), max(action_history['steps']))
+        ax3.set_xlim(xlim)
+        ax4.set_xlim(xlim)
+        ax5.set_xlim(xlim)
+    
+    plt.tight_layout()
+    plt.pause(0.01)
+
+def test_with_dataset(policy, dataset, indices, device, output_dir, episode_idx, step_vis=False):
     """Test policy with real dataset samples
     
     Args:
@@ -186,6 +350,7 @@ def test_with_dataset(policy, dataset, indices, device, output_dir, episode_idx)
         device: Device to run inference on
         output_dir: Directory to save results
         episode_idx: Episode index being tested
+        step_vis: Flag to enable step-by-step visualization
     """
     # Set up tensorboard
     writer = tb.SummaryWriter(output_dir / "tensorboard")
@@ -204,6 +369,18 @@ def test_with_dataset(policy, dataset, indices, device, output_dir, episode_idx)
     total_loss = 0
     n_steps = len(indices)
     
+    # Initialize histories for visualization
+    state_history = {'steps': [], 'values': []} if step_vis else None
+    action_history = {
+        'steps': [],
+        'predicted': [],
+        'target': []
+    } if step_vis else None
+    
+    # Create figure for visualization
+    if step_vis:
+        plt.figure(figsize=(20, 12))
+    
     try:
         start_time = time.time()
         for step, batch in enumerate(dataloader):
@@ -220,10 +397,37 @@ def test_with_dataset(policy, dataset, indices, device, output_dir, episode_idx)
             with torch.inference_mode():
                 action = policy.select_action(observation)
             
+            if step_vis:
+                # Update state history
+                current_state = batch["observation.state"][0].cpu().numpy()
+                state_history['steps'].append(step)
+                state_history['values'].append(current_state)
+                
+                # Update action history
+                action_history['steps'].append(step)
+                action_history['predicted'].append(action[0].cpu().numpy())
+                action_history['target'].append(batch["action"][0].cpu().numpy())
+                
+                # Visualize current step with all data
+                visualize_step_data(
+                    image=batch["observation.image.left"][0],
+                    state=batch["observation.state"][0],
+                    action=action[0],
+                    target_action=batch["action"][0],
+                    step=step,
+                    episode_idx=episode_idx,
+                    state_history=state_history,
+                    action_history=action_history
+                )
+                
+                # Wait for window close or key press
+                plt.waitforbuttonpress()
+            
             # Get target action from dataset
             target_action = batch["action"]
             
             # Calculate MSE loss
+            # 反归一化后的动作值计算的损失
             loss = F.mse_loss(action, target_action)
             total_loss += loss.item()
             
@@ -303,6 +507,9 @@ def test_with_dataset(policy, dataset, indices, device, output_dir, episode_idx)
         logging.info(f"tensorboard --logdir {output_dir}")
         logging.info("Then open http://localhost:6006 in your browser")
 
+        if step_vis:
+            plt.close()
+
 def setup_logging(output_dir):
     """Setup logging to both file and console"""
     # Create formatter
@@ -347,6 +554,8 @@ def main():
     parser.add_argument("--model-path", type=str, 
                        default="/home/fourier/models/03-03-18-24_real_world_diffusion_pnp_coke_arm_loss2_horizon64_batch128_down4096/checkpoints/300000/pretrained_model",
                        help="Path to pretrained model")
+    parser.add_argument("--step-vis", action="store_true",
+                       help="Enable step-by-step visualization")
     args = parser.parse_args()
     
     # Log command line arguments
@@ -416,7 +625,8 @@ def main():
             indices=indices,
             device=device,
             output_dir=output_dir,
-            episode_idx=args.episode_idx  # Pass episode_idx to the function
+            episode_idx=args.episode_idx,
+            step_vis=args.step_vis  # Pass visualization flag
         )
     else:
         try:
