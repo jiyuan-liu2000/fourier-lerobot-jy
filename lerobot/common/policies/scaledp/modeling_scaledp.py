@@ -1,9 +1,9 @@
 '''
 Author: Jiyuan Liu
 Date: 2025-02-27 21:44:47
-LastEditors: Jiyuan Liu
-LastEditTime: 2025-03-17 14:00:57
-FilePath: /fourier-lerobot/lerobot/common/policies/scaledp/modeling_scaledp.py
+LastEditors: WenJiawei
+LastEditTime: 2025-04-11 13:21:21
+FilePath: /fourier-lerobot-jy/lerobot/common/policies/scaledp/modeling_scaledp.py
 Description: 
 
 Copyright (c) 2024 by Fourier Intelligence Co. Ltd , All Rights Reserved. 
@@ -27,14 +27,30 @@ from torchvision.ops.misc import FrozenBatchNorm2d
 from torch.jit import Final
 from timm.models.vision_transformer import Mlp, use_fused_attn
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
+from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 
-from lerobot.common.policies.pretrained import PreTrainedPolicy
+
+from huggingface_hub import PyTorchModelHubMixin
+
+# from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.policies.scaledp.configuration_scaledp import ScaleDPPolicyConfig
 from lerobot.common.vision.dinov2 import DINOv2BackBone
-from lerobot.common.policies.normalize import Normalize, Unnormalize
+from lerobot.common.policies.normalize import Normalize, Unnormalize, AdaptiveNormalize, AdaptiveUnnormalize
 from lerobot.common.policies.utils import populate_queues, get_output_shape
 
-class ScaleDPPolicy(PreTrainedPolicy):
+import random
+import os
+import json
+from pathlib import Path
+from datetime import datetime
+
+class ScaleDPPolicy(    
+    nn.Module,  # 继承PyTorch的基础模块类
+    PyTorchModelHubMixin,  # 继承HuggingFace模型仓库混入类
+    library_name="lerobot",  # 指定库名称
+    repo_url="https://github.com/huggingface/lerobot",  # 指定仓库URL
+    tags=["robotics", "diffusion-policy"],  # 模型标签
+    ):
     config_class = ScaleDPPolicyConfig
     name = "scale_dp"
 
@@ -43,18 +59,79 @@ class ScaleDPPolicy(PreTrainedPolicy):
             config: ScaleDPPolicyConfig,
             dataset_stats: dict[str, dict[str, Tensor]] | None = None,
     ):
-        super().__init__(config)
+        super().__init__()
         self.config = config
         
-        self.normalize_inputs = Normalize(config.input_features, config.normalization_mapping, dataset_stats)
-        self.normalize_targets = Normalize(
-            config.output_features, config.normalization_mapping, dataset_stats
-        )
-        self.unnormalize_outputs = Unnormalize(
-            config.output_features, config.normalization_mapping, dataset_stats
+
+        # 1. 定义关节分组
+        joint_groups = {
+            "left_arm": [0, 1, 2, 3, 4, 5, 6],       # 左臂关节索引
+            "right_arm": [7, 8, 9, 10, 11, 12, 13],  # 右臂关节索引
+            "left_hand": [14, 15, 16, 17, 18, 19],   # 左手关节索引
+            "right_hand": [20, 21, 22, 23, 24, 25]   # 右手关节索引
+        }
+
+        # 2. 定义缩放因子 - 手臂使用较小的缩放因子，手部使用较大的缩放因子
+        scaling_factors = {
+            "left_arm": 0.4,
+            "right_arm": 0.4,
+            "left_hand": 0.9,
+            "right_hand": 0.9
+        }
+
+        # 3. 创建自适应归一化器
+        self.normalize_inputs = AdaptiveNormalize(
+            shapes=config.input_shapes, 
+            modes=config.input_normalization_modes,
+            stats=dataset_stats,
+            joint_groups=joint_groups,
+            scaling_factors=scaling_factors
         )
 
+        self.normalize_targets = AdaptiveNormalize(
+            shapes=config.output_shapes, 
+            modes=config.output_normalization_modes,
+            stats=dataset_stats,
+            joint_groups=joint_groups,
+            scaling_factors=scaling_factors
+        )
+
+        # 4. 创建自适应反归一化器
+        self.unnormalize_outputs = AdaptiveUnnormalize(
+            shapes=config.output_shapes,
+            modes=config.output_normalization_modes,
+            stats=dataset_stats,
+            joint_groups=joint_groups,
+            scaling_factors=scaling_factors
+        )
+
+
+
+
+        # self.normalize_inputs = Normalize(config.input_shapes, config.input_normalization_modes, dataset_stats)
+        # self.normalize_targets = Normalize(
+        #     config.output_shapes, config.output_normalization_modes, dataset_stats
+        # )
+        # self.unnormalize_outputs = Unnormalize(
+        #     config.output_shapes, config.output_normalization_modes, dataset_stats
+        # )
+
+
+        ################################
+        self.expected_image_keys = [k for k in config.input_shapes if k.startswith("observation.image")]
+        self.use_env_state = "observation.environment_state" in config.input_shapes
+
         self.model = ScaleDP(config)
+
+        # 添加梯度跟踪相关属性
+        self.grad_log_dir = Path("gradient_logs")
+        self.grad_log_dir.mkdir(exist_ok=True)
+        self.grad_stats = {
+            "step": 0,
+            "layers_with_small_grad": {},
+            "layers_with_large_grad": {}
+        }
+        self.hooks = []
 
     def get_optim_params(self) -> dict:
         return self.model.get_optim_groups()
@@ -65,9 +142,9 @@ class ScaleDPPolicy(PreTrainedPolicy):
             "observation.state": deque(maxlen=self.config.n_obs_steps),
             "action": deque(maxlen=self.config.n_action_steps),
         }
-        if self.config.image_features:
+        if len(self.expected_image_keys) > 0:
             self._queues["observation.images"] = deque(maxlen=self.config.n_obs_steps)
-        if self.config.env_state_feature:
+        if self.use_env_state:
             self._queues["observation.environment_state"] = deque(maxlen=self.config.n_obs_steps)
 
     @torch.no_grad
@@ -90,17 +167,228 @@ class ScaleDPPolicy(PreTrainedPolicy):
         action = self._queues["action"].popleft()
         return action
 
-    def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, None]:
+    def register_gradient_hooks(self):
+        """注册梯度钩子，用于监控特定层的梯度"""
+        # 移除之前的钩子
+        for hook in self.hooks:
+            hook.remove()
+        self.hooks = []
+        
+        # 跟踪关键组件的梯度
+        tracked_modules = {
+            "encoder": self.model.vision_encoder,
+            "embedder": self.model.x_embedder,
+            "t_embedder": self.model.t_embedder,
+            "combine": self.model.combine,
+            "blocks": self.model.blocks,
+            "final_layer": self.model.final_layer
+        }
+        
+        def grad_hook(name):
+            def hook(grad):
+                if grad is not None:
+                    norm = grad.norm().item()
+                    if norm < 1e-6:
+                        if name not in self.grad_stats["layers_with_small_grad"]:
+                            self.grad_stats["layers_with_small_grad"][name] = []
+                        self.grad_stats["layers_with_small_grad"][name].append({
+                            "step": self.grad_stats["step"],
+                            "norm": norm
+                        })
+                    elif norm > 10.0:
+                        if name not in self.grad_stats["layers_with_large_grad"]:
+                            self.grad_stats["layers_with_large_grad"][name] = []
+                        self.grad_stats["layers_with_large_grad"][name].append({
+                            "step": self.grad_stats["step"],
+                            "norm": norm
+                        })
+                return grad
+            return hook
+        
+        # 为特定模块注册钩子
+        for module_name, module in tracked_modules.items():
+            if isinstance(module, nn.ModuleList):
+                for i, block in enumerate(module):
+                    for name, param in block.named_parameters():
+                        if param.requires_grad:
+                            self.hooks.append(param.register_hook(
+                                grad_hook(f"{module_name}.{i}.{name}")
+                            ))
+            else:
+                for name, param in module.named_parameters():
+                    if param.requires_grad:
+                        self.hooks.append(param.register_hook(
+                            grad_hook(f"{module_name}.{name}")
+                        ))
+        
+        print(f"注册了 {len(self.hooks)} 个梯度钩子")
+        
+    def save_gradient_stats(self):
+        """保存梯度统计信息到文件
+        结果保存到路径 gradient_logs 下
+        保存grad_stats_step_{step}_{timestamp}.json 梯度统计信息
+        保存grad_summary_step_{step}_{timestamp}.txt 梯度问题摘要
+        """
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = self.grad_log_dir / f"grad_stats_step_{self.grad_stats['step']}_{timestamp}.json"
+        
+        # 限制记录数量，避免文件过大
+        for key in ["layers_with_small_grad", "layers_with_large_grad"]:
+            for layer_name in list(self.grad_stats[key].keys()):
+                # 只保留最近的100条记录
+                if len(self.grad_stats[key][layer_name]) > 100:
+                    self.grad_stats[key][layer_name] = self.grad_stats[key][layer_name][-100:]
+        
+        with open(filename, 'w') as f:
+            json.dump(self.grad_stats, f, indent=2)
+        
+        print(f"梯度统计信息已保存到 {filename}")
+        
+        # 创建梯度问题摘要
+        summary_file = self.grad_log_dir / f"grad_summary_step_{self.grad_stats['step']}_{timestamp}.txt"
+        with open(summary_file, 'w') as f:
+            f.write(f"=== 梯度问题摘要 (步骤 {self.grad_stats['step']}) ===\n\n")
+            
+            # 梯度过小的层
+            f.write("梯度极小的层 (< 1e-6):\n")
+            for layer_name, records in self.grad_stats["layers_with_small_grad"].items():
+                if records:
+                    avg_norm = sum(r["norm"] for r in records) / len(records)
+                    f.write(f"  {layer_name}: 出现 {len(records)} 次, 平均范数: {avg_norm:.8f}\n")
+            
+            # 梯度过大的层
+            f.write("\n梯度过大的层 (> 10.0):\n")
+            for layer_name, records in self.grad_stats["layers_with_large_grad"].items():
+                if records:
+                    avg_norm = sum(r["norm"] for r in records) / len(records)
+                    f.write(f"  {layer_name}: 出现 {len(records)} 次, 平均范数: {avg_norm:.2f}\n")
+            
+            # 问题模式分析
+            f.write("\n问题模式分析:\n")
+            small_grad_patterns = self._analyze_layer_patterns(self.grad_stats["layers_with_small_grad"])
+            f.write("  梯度极小模式:\n")
+            for pattern, count in small_grad_patterns.items():
+                f.write(f"    {pattern}: {count} 层\n")
+            
+            large_grad_patterns = self._analyze_layer_patterns(self.grad_stats["layers_with_large_grad"])
+            f.write("  梯度过大模式:\n")
+            for pattern, count in large_grad_patterns.items():
+                f.write(f"    {pattern}: {count} 层\n")
+    
+    def _analyze_layer_patterns(self, layer_dict):
+        """分析层名称中的模式"""
+        patterns = {}
+        for layer_name in layer_dict.keys():
+            # 提取模块类型
+            parts = layer_name.split('.')
+            if len(parts) >= 2:
+                if parts[0] == "blocks":
+                    pattern = f"transformer_block.{parts[2] if len(parts)>2 else 'general'}"
+                else:
+                    pattern = parts[0]
+                
+                patterns[pattern] = patterns.get(pattern, 0) + 1
+        return patterns
+
+    def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        # import pdb;pdb.set_trace()  
+        
+        ##################可视化 batch["observation.images"]
+        # images = batch['observation.image.left'].cpu().numpy() # 维度：【batch_size, n_obs_steps, channels, height, width】
+        # batch_size, n_obs_steps,channels, height, width  = images.shape
+
+        # n_pic_show = min(n_obs_steps, 4)  # 最多显示4张图
+        # fig, axes = plt.subplots(1, n_pic_show, figsize=(12, 3))  # 调整图像大小
+        # for i in range(n_pic_show):
+        #     ax = axes[i]
+        #     # 调整维度顺序以正确显示图像
+        #     img = images[0, i].transpose(1, 2, 0)  # 从(C,H,W)转换为(H,W,C)
+        #     ax.imshow(img)
+        #     ax.set_title(f'Step {i}')
+        #     ax.axis('off')
+        # plt.tight_layout()
+        # plt.show()
+
+        
         batch = self.normalize_inputs(batch)
+
+        
         if self.config.image_features:
-            batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
+            batch = dict(batch)
             batch["observation.images"] = torch.stack(
-                [batch[key] if batch[key].dim == 5 else batch[key].unsqueeze(1) for key in self.config.image_features], dim=-4
-                )
+                [batch[key] for key in self.config.image_features], dim=-4
+            )
+        
         batch = self.normalize_targets(batch)
+        
+        # 注册梯度钩子 (每100步注册一次，减少开销)
+        if self.training and random.random() < 0.01:
+            self.register_gradient_hooks()
+        
+        # 前向传播
         loss = self.model.compute_loss(batch)
-        # no output_dict so returning None
-        return loss, None
+        
+        # 更新步骤计数
+        if self.training:
+            self.grad_stats["step"] += 1
+            
+            # 每500步保存一次梯度统计
+            if self.grad_stats["step"] % 500 == 0:
+                self.save_gradient_stats()
+                
+            # 详细记录小梯度模块
+            if random.random() < 0.01:  # 1%概率检查
+                with torch.no_grad():
+                    for name, module in self.model.named_modules():
+                        if hasattr(module, 'weight') and module.weight is not None and module.weight.grad is not None:
+                            grad_norm = module.weight.grad.norm().item()
+                            if grad_norm < 1e-6:
+                                print(f"模块 {name} 梯度极小: {grad_norm:.8f}")
+                                
+                                # 记录到列表中
+                                if name not in self.grad_stats["layers_with_small_grad"]:
+                                    self.grad_stats["layers_with_small_grad"][name] = []
+                                
+                                self.grad_stats["layers_with_small_grad"][name].append({
+                                    "step": self.grad_stats["step"],
+                                    "norm": grad_norm
+                                })
+        
+        return {"loss": loss}
+
+    def log_model_structure(self):
+        """记录模型完整结构到日志文件"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        structure_file = self.grad_log_dir / f"model_structure_{timestamp}.txt"
+        
+        with open(structure_file, 'w') as f:
+            f.write("=== ScaleDP模型结构 ===\n\n")
+            
+            # 主要组件
+            f.write("主要组件:\n")
+            f.write(f"  vision_encoder: {type(self.model.vision_encoder).__name__}\n")
+            f.write(f"  x_embedder: {type(self.model.x_embedder).__name__}\n")  
+            f.write(f"  t_embedder: {type(self.model.t_embedder).__name__}\n")
+            f.write(f"  blocks: {len(self.model.blocks)}个Transformer块\n")
+            f.write(f"  final_layer: {type(self.model.final_layer).__name__}\n\n")
+            
+            # 参数统计
+            total_params = sum(p.numel() for p in self.model.parameters())
+            trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+            f.write(f"总参数量: {total_params:,}\n")
+            f.write(f"可训练参数量: {trainable_params:,}\n\n")
+            
+            # 详细层结构
+            f.write("详细层结构:\n")
+            for name, module in self.model.named_modules():
+                if isinstance(module, (nn.Linear, nn.Conv2d, nn.LayerNorm, nn.MultiheadAttention)):
+                    params = sum(p.numel() for p in module.parameters())
+                    f.write(f"  {name}: {type(module).__name__}, 参数量: {params:,}\n")
+        
+        print(f"模型结构已保存到 {structure_file}")
 
 
 class Attention(nn.Module):
@@ -239,8 +527,11 @@ class ScaleDPBlock(nn.Module):
 
     def forward(self, x, c, attn_mask=None):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
-        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), attn_mask=attn_mask) # norm, scale&shift, attn, scale,
+        identity = x
+        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), attn_mask=attn_mask)
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        scale_factor = 0.2  # 残差缩放因子
+        x = x + scale_factor * identity  # 额外的直接残差路径
         return x
 
 
@@ -392,10 +683,23 @@ class VisionEncoder(nn.Module):
         # height and width from `config.image_features`.
 
         # Note: we have a check in the config class to make sure all images have the same shape.
-        images_shape = next(iter(config.image_features.values())).shape
-        dummy_shape_h_w = config.crop_shape if config.crop_shape is not None else images_shape[1:]
-        dummy_shape = (1, images_shape[0], *dummy_shape_h_w)
-        feature_map_shape = get_output_shape(self.backbone, dummy_shape)[1:]
+        
+        # import pdb; pdb.set_trace()
+        image_keys = [k for k in config.input_shapes if k.startswith("observation.image")]
+
+        image_key = image_keys[0]
+        dummy_input_h_w = (
+            config.crop_shape if config.crop_shape is not None else config.input_shapes[image_key][1:]
+        )
+        dummy_input = torch.zeros(size=(1, config.input_shapes[image_key][0], *dummy_input_h_w))
+        with torch.inference_mode():
+            dummy_feature_map = self.backbone(dummy_input)
+        if isinstance(dummy_feature_map, dict):
+            self.use_feature_map_key = True
+            dummy_feature_map = dummy_feature_map["feature_map"]
+        else:
+            self.use_feature_map_key = False
+        feature_map_shape = tuple(dummy_feature_map.shape[1:])
 
         self.pool = SpatialSoftmax(feature_map_shape, num_kp=config.spatial_softmax_num_keypoints)
         # self.feature_dim = config.cond_dim * len(self.config.image_features)
@@ -484,9 +788,8 @@ class ScaleDP(nn.Module):
             self.cond_dim = encoders[0].feature_dim * num_images
         
         # get state_dim and action_dim
-        if self.config.robot_state_feature:
-            self.state_dim = self.config.robot_state_feature.shape[0]
-        self.action_dim = self.config.action_feature.shape[0]
+        self.state_dim = self.config.input_shapes["observation.state"][0]
+        self.action_dim = self.config.output_shapes["action"][0]
         
         self.is_tinyvla = config.is_tinyvla
         if config.is_tinyvla:
@@ -531,14 +834,60 @@ class ScaleDP(nn.Module):
         
         self.num_inference_timesteps = config.num_inference_timesteps
         # self.proj_to_action = nn.Identity()
+
+        # num_train_timesteps: int = 1000,
+        # beta_start: float = 0.0001,
+        # beta_end: float = 0.02,
+        # beta_schedule: str = "linear",
+        # trained_betas: ndarray | List[float] | None = None,
+        # clip_sample: bool = True,
+        # set_alpha_to_one: bool = True,
+        # steps_offset: int = 0,
+        # prediction_type: str = "epsilon",
+        # thresholding: bool = False,
+        # dynamic_thresholding_ratio: float = 0.995,
+        # clip_sample_range: float = 1,
+        # sample_max_value: float = 1,
+        # timestep_spacing: str = "leading",
+        # rescale_betas_zero_snr: bool = False
         self.noise_scheduler = DDIMScheduler(
             num_train_timesteps=config.num_train_timesteps, # 100
             beta_schedule='squaredcos_cap_v2',
             clip_sample=True,
             set_alpha_to_one=True,
             steps_offset=0,
-            prediction_type='epsilon'
+            prediction_type='epsilon',
+            # prediction_type='v_prediction',
+            timestep_spacing='trailing'
         )
+
+
+        # num_train_timesteps: int = 1000,
+        # beta_start: float = 0.0001,
+        # beta_end: float = 0.02,
+        # beta_schedule: str = "linear",
+        # trained_betas: ndarray | List[float] | None = None,
+        # variance_type: str = "fixed_small",
+        # clip_sample: bool = True,
+        # prediction_type: str = "epsilon",
+        # thresholding: bool = False,
+        # dynamic_thresholding_ratio: float = 0.995,
+        # clip_sample_range: float = 1,
+        # sample_max_value: float = 1,
+        # timestep_spacing: str = "leading",
+        # steps_offset: int = 0,
+        # rescale_betas_zero_snr: bool = False
+        
+        self.noise_scheduler_DDPM = DDPMScheduler(
+            num_train_timesteps=config.num_train_timesteps, # 100
+            beta_schedule='squaredcos_cap_v2',
+            clip_sample=True,
+            steps_offset=0,
+            prediction_type='epsilon'
+            # prediction_type='v_prediction'
+        )
+
+
         self.num_noise_samples = config.noise_samples # 1
 
     def initialize_weights(self):
@@ -656,12 +1005,26 @@ class ScaleDP(nn.Module):
     def compute_loss(self, batch):
         assert set(batch).issuperset({"observation.state", "action", "action_is_pad"})
         assert "observation.images" in batch
+        # import pdb; pdb.set_trace()
         batch_size, n_obs_steps = batch["observation.images"].shape[:2]
         horizon = batch["action"].shape[1]
         assert horizon == self.config.horizon
         assert n_obs_steps == self.config.n_obs_steps, f"n_obs_steps:{n_obs_steps} != self.config.n_obs_steps:{self.config.n_obs_steps}"
 
         images_per_camera = einops.rearrange(batch["observation.images"], "b s n ... -> n (b s) ...")
+        
+        # 计算图像数值范围
+        for i, images in enumerate(images_per_camera):
+            min_val = torch.min(images).item()
+            max_val = torch.max(images).item()
+            mean_val = torch.mean(images).item()
+            std_val = torch.std(images).item()
+            print(f"相机 {i} 图像统计:")
+            print(f"  最小值: {min_val:.3f}")
+            print(f"  最大值: {max_val:.3f}") 
+            print(f"  均值: {mean_val:.3f}")
+            print(f"  标准差: {std_val:.3f}")
+        
         img_features_list = torch.cat(
                     [
                         encoder(images)
@@ -694,8 +1057,11 @@ class ScaleDP(nn.Module):
         timesteps = timesteps.repeat(self.num_noise_samples)
         is_pad = batch["action_is_pad"].repeat(self.num_noise_samples, 1)
         # TODO: modify states to support multiple steps
-        states = batch["observation.state"].squeeze().repeat(self.num_noise_samples, 1)
+        # import pdb; pdb.set_trace()
+        # states = batch["observation.state"].squeeze().repeat(self.num_noise_samples, 1)
+        states = batch["observation.state"].repeat(self.num_noise_samples, 1, 1)
 
+        # import pdb;pdb.set_trace()
         noise_pred = self.model_forward(noisy_actions, timesteps, global_cond=hidden_states, states=states)
         noise = noise.view(noise.size(0) * noise.size(1), *noise.size()[2:])
         loss = torch.nn.functional.mse_loss(noise_pred, noise, reduction='none')
@@ -707,6 +1073,42 @@ class ScaleDP(nn.Module):
         assert n_obs_steps == self.config.n_obs_steps
 
         images_per_camera = einops.rearrange(batch["observation.images"], "b s n ... -> n (b s) ...")
+
+        # ##################### 可视化 images_per_camera
+        # import matplotlib.pyplot as plt
+        # import numpy as np
+        
+        # # 获取第一个相机的图像
+        # first_camera_images = images_per_camera[0].cpu().numpy()  # 维度: [(b*s), channels, height, width]
+        
+        # n_images = min(4, first_camera_images.shape[0])  # 最多显示4张图片
+        
+        # fig, axes = plt.subplots(1, n_images, figsize=(12, 3))
+        # for i in range(n_images):
+        #     ax = axes[i]
+        #     # 调整维度顺序以正确显示图像
+        #     img = first_camera_images[i].transpose(1, 2, 0)  # 从(C,H,W)转换为(H,W,C)
+        #     ax.imshow(img)
+        #     ax.set_title(f'Image {i}')
+        #     ax.axis('off')
+        # plt.tight_layout()
+        # plt.show()
+
+        # 计算图像统计信息
+        first_camera_images = images_per_camera[0].cpu()  # 获取第一个相机的图像
+        
+        # 计算统计值
+        mean_val = torch.mean(first_camera_images)
+        min_val = torch.min(first_camera_images)
+        max_val = torch.max(first_camera_images) 
+        std_val = torch.std(first_camera_images)
+
+        print(f"图像统计信息:")
+        print(f"均值: {mean_val:.4f}")
+        print(f"最小值: {min_val:.4f}")
+        print(f"最大值: {max_val:.4f}")
+        print(f"标准差: {std_val:.4f}")
+        
         img_features_list = torch.cat(
                     [
                         encoder(images)
@@ -724,6 +1126,7 @@ class ScaleDP(nn.Module):
         naction = noisy_action.to(dtype=img_features.dtype)
         # init scheduler
         self.noise_scheduler.set_timesteps(self.num_inference_timesteps)
+        # import pdb; pdb.set_trace()
 
         for k in self.noise_scheduler.timesteps:
             # predict noise
@@ -745,6 +1148,7 @@ class ScaleDP(nn.Module):
         t: (N,) tensor of diffusion timesteps
         global_cond: (N, n_obs_steps, D) tensor of conScaleDPions: image embeddings
         """
+        # import pdb; pdb.set_trace()
         if self.is_tinyvla:
             global_cond = self.global_1d_pool(global_cond.permute(0, 2, 1)).squeeze(-1)
             global_cond = self.norm_after_pool(global_cond)
@@ -761,6 +1165,8 @@ class ScaleDP(nn.Module):
 
         x = self.x_embedder(x) + self.pos_embed.to(device=x.device, dtype=x.dtype)  # (N, T, D), where T = prediction_horizon
         t = self.t_embedder(t)  # (N, D)
+
+        global_cond = global_cond[:,-1]
         if self.obs_as_cond:
             global_cond = self.cond_obs_emb(global_cond)  # (N, D)
         # c = t + global_cond.sum(dim=1)  # (N, D)

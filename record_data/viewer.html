@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Robot Data Viewer</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f7f7f7; }
+        .container { display: flex; flex-wrap: wrap; gap: 20px; }
+        .video-container { flex: 2; min-width: 400px; background-color: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        .data-container { flex: 1; min-width: 300px; padding: 15px; background-color: white; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        video { width: 100%; border-radius: 4px; }
+        .current-data { background-color: #f5f5f5; padding: 12px; margin-top: 15px; border-radius: 6px; }
+        .controls { margin: 15px 0; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+        button { padding: 8px 15px; background-color: #4285f4; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background-color: #3b78e7; }
+        #currentTime { margin-left: 15px; font-weight: bold; }
+        h1, h3 { color: #333; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { border: 1px solid #ddd; padding: 6px; text-align: right; }
+        th { background-color: #f2f2f2; text-align: center; }
+        tr:nth-child(even) { background-color: #f9f9f9; }
+        .time-info { display: flex; justify-content: space-between; margin-bottom: 10px; }
+        .time-info span { font-weight: bold; }
+        .highlight { background-color: #ffeb3b !important; }
+        .server-instructions { background-color: #e1f5fe; padding: 15px; margin-bottom: 20px; border-radius: 8px; display: none; }
+        .server-instructions code { background-color: #263238; color: white; padding: 3px 6px; border-radius: 4px; }
+        #status { margin-top: 20px; padding: 10px; background-color: #f0f0f0; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <div class="server-instructions" id="serverInstructions">
+        <h2>本地服务器设置</h2>
+        <p>您正在通过文件协议（file://）查看此页面。为了正确加载数据文件，请使用HTTP服务器:</p>
+        <ol>
+            <li>打开终端，切换到record_data目录</li>
+            <li>运行以下命令启动Python简易HTTP服务器：<br>
+                <code>python -m http.server 8000</code></li>
+            <li>然后在浏览器中访问: <a href="#" id="serverLink">http://localhost:8000/viewer.html</a></li>
+        </ol>
+    </div>
+
+    <h1>Robot Data Playback</h1>
+    <div class="container">
+        <div class="video-container">
+            <video id="robotVideo" controls>
+                <source src="test.mp4" type="video/mp4">
+                您的浏览器不支持视频标签
+            </video>
+            <div class="controls">
+                <button onclick="document.getElementById('robotVideo').currentTime -= (1/30);">-1 Frame</button>
+                <button onclick="document.getElementById('robotVideo').currentTime += (1/30);">+1 Frame</button>
+                <button onclick="document.getElementById('robotVideo').playbackRate = 0.5;">0.5x Speed</button>
+                <button onclick="document.getElementById('robotVideo').playbackRate = 1.0;">1.0x Speed</button>
+                <button onclick="document.getElementById('robotVideo').playbackRate = 2.0;">2.0x Speed</button>
+                <span id="currentTime">Time: 0.00s</span>
+            </div>
+        </div>
+        <div class="data-container">
+            <h3>Current State Data</h3>
+            <div id="currentState" class="current-data">No data</div>
+            <h3>Current Action Data</h3>
+            <div id="currentAction" class="current-data">No data</div>
+        </div>
+    </div>
+    
+    <div id="status">状态: 正在加载数据...</div>
+    
+    <script>
+        // 检查页面是否通过HTTP服务器加载
+        if (window.location.protocol === 'file:') {
+            document.getElementById('serverInstructions').style.display = 'block';
+            document.getElementById('serverLink').href = 'http://localhost:8000/viewer.html';
+            document.getElementById('status').innerHTML = '状态: <span style="color:red">请使用HTTP服务器访问此页面</span>';
+        }
+        
+        // 初始化数据
+        let stateData = [];
+        let actionData = [];
+        let currentStateIndex = -1;
+        let currentActionIndex = -1;
+        
+        // 使用Promise同时加载两个数据文件
+        Promise.all([
+            fetch('./state_data.json').then(response => {
+                if (!response.ok) {
+                    throw new Error(`状态数据加载失败: ${response.status}`);
+                }
+                return response.json();
+            }),
+            fetch('./action_data.json').then(response => {
+                if (!response.ok) {
+                    throw new Error(`动作数据加载失败: ${response.status}`);
+                }
+                return response.json();
+            })
+        ])
+        .then(([stateDataResult, actionDataResult]) => {
+            stateData = stateDataResult;
+            actionData = actionDataResult;
+            document.getElementById('status').innerHTML = `状态: 已加载 ${stateData.length} 条状态数据和 ${actionData.length} 条动作数据`;
+            console.log("Data loaded:", stateData.length, "state entries,", actionData.length, "action entries");
+            
+            // 初始化视频时间更新事件侦听器
+            const videoElement = document.getElementById('robotVideo');
+            videoElement.addEventListener('timeupdate', function() {
+                updateDataDisplay(this.currentTime);
+            });
+            
+            // 视频加载完成时更新一次
+            videoElement.addEventListener('loadeddata', function() {
+                console.log("Video loaded, duration:", this.duration);
+                updateDataDisplay(0);
+            });
+        })
+        .catch(error => {
+            document.getElementById('status').innerHTML = `状态: <span style="color:red">错误: ${error.message}</span>`;
+            console.error("Error loading data:", error);
+        });
+        
+        // 更新数据显示函数
+        function updateDataDisplay(currentTime) {
+            document.getElementById('currentTime').textContent = 'Time: ' + currentTime.toFixed(2) + 's';
+            
+            // 找到最接近当前时间的状态数据
+            let closestState = null;
+            let minStateDiff = Infinity;
+            let stateIndex = -1;
+            
+            for(let i = 0; i < stateData.length; i++) {
+                const state = stateData[i];
+                const diff = Math.abs(state.timestamp - currentTime);
+                if(diff < minStateDiff) {
+                    minStateDiff = diff;
+                    closestState = state;
+                    stateIndex = i;
+                }
+            }
+            
+            // 找到最接近当前时间的动作数据
+            let closestAction = null;
+            let minActionDiff = Infinity;
+            let actionIndex = -1;
+            
+            for(let i = 0; i < actionData.length; i++) {
+                const action = actionData[i];
+                const diff = Math.abs(action.timestamp - currentTime);
+                if(diff < minActionDiff) {
+                    minActionDiff = diff;
+                    closestAction = action;
+                    actionIndex = i;
+                }
+            }
+            
+            // 更新高亮状态
+            currentStateIndex = stateIndex;
+            currentActionIndex = actionIndex;
+            
+            // 更新状态显示
+            if(closestState) {
+                let stateHTML = `
+                <div class="time-info">
+                    <span>Frame: ${closestState.frame}</span>
+                    <span>Time: ${closestState.timestamp.toFixed(3)}s</span>
+                </div>`;
+                
+                // 如果状态是数组，显示为表格
+                if(Array.isArray(closestState.state)) {
+                    stateHTML += '<table><tr><th>Index</th><th>Value</th></tr>';
+                    for(let i = 0; i < closestState.state.length; i++) {
+                        stateHTML += `<tr><td>${i}</td><td>${formatNumber(closestState.state[i])}</td></tr>`;
+                    }
+                    stateHTML += '</table>';
+                } else {
+                    // 否则显示为对象
+                    stateHTML += `<pre>${JSON.stringify(closestState.state, null, 2)}</pre>`;
+                }
+                
+                document.getElementById('currentState').innerHTML = stateHTML;
+            }
+            
+            // 更新动作显示
+            if(closestAction) {
+                let actionHTML = `
+                <div class="time-info">
+                    <span>Frame: ${closestAction.frame}</span>
+                    <span>Time: ${closestAction.timestamp.toFixed(3)}s</span>
+                </div>`;
+                
+                // 如果动作是数组，显示为表格
+                if(Array.isArray(closestAction.action)) {
+                    actionHTML += '<table><tr><th>Index</th><th>Value</th></tr>';
+                    for(let i = 0; i < closestAction.action.length; i++) {
+                        actionHTML += `<tr><td>${i}</td><td>${formatNumber(closestAction.action[i])}</td></tr>`;
+                    }
+                    actionHTML += '</table>';
+                } else {
+                    // 否则显示为对象
+                    actionHTML += `<pre>${JSON.stringify(closestAction.action, null, 2)}</pre>`;
+                }
+                
+                document.getElementById('currentAction').innerHTML = actionHTML;
+            }
+        }
+        
+        // 格式化数字，保留4位小数
+        function formatNumber(num) {
+            if (typeof num === 'number') {
+                return num.toFixed(4);
+            }
+            return num;
+        }
+    </script>
+</body>
+</html>

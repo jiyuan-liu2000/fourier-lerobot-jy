@@ -26,8 +26,9 @@ import sys
 import matplotlib.cm as cm
 
 from lerobot.common.policies.diffusion.modeling_diffusion import DiffusionPolicy
+from lerobot.common.policies.scaledp.modeling_scaledp import ScaleDPPolicy
 
-def transform_image(image, crop_size=(224, 224)):
+def transform_image(image, crop_size=(224, 224), resize_size=256):
     """Preprocess image"""
     # Convert to float and normalize
     image = image.astype(np.float32) / 255.0
@@ -37,7 +38,7 @@ def transform_image(image, crop_size=(224, 224)):
     
     # Image transformations
     transform = transforms.Compose([
-        # transforms.Resize(crop_size),
+        transforms.Resize(resize_size),
         transforms.CenterCrop(crop_size),
     ])
     
@@ -50,9 +51,9 @@ def generate_random_state(state_dim=7):
 
 def load_policy(policy_path):
     """Load pretrained policy"""
-    policy = DiffusionPolicy.from_pretrained(policy_path)
-    policy.n_action_steps = 64
-    print(f"{policy.n_action_steps=}")
+    # policy = DiffusionPolicy.from_pretrained(policy_path)
+    policy = ScaleDPPolicy.from_pretrained(policy_path)
+
     policy.eval()  # Set to evaluation mode
     return policy
 
@@ -392,7 +393,7 @@ def test_with_dataset(policy, dataset, indices, device, output_dir, episode_idx,
                 "observation.state": batch["observation.state"],
                 "observation.image.left": batch["observation.image.left"],
             }
-            
+            # import pdb; pdb.set_trace()
             # Generate action using policy
             with torch.inference_mode():
                 action = policy.select_action(observation)
@@ -543,7 +544,7 @@ def main():
     # Add argument parser for test mode
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["random", "dataset"], default="random",
+    parser.add_argument("--mode", choices=["random", "dataset", "recorded_data"], default="random",
                        help="Test mode: random state or dataset")
     parser.add_argument("--root", type=str, default="/home/fourier/data",
                        help="Root directory for dataset")
@@ -556,6 +557,9 @@ def main():
                        help="Path to pretrained model")
     parser.add_argument("--step-vis", action="store_true",
                        help="Enable step-by-step visualization")
+    parser.add_argument("--record-dir", type=str, default="/home/fourier/fourier-lerobot-jy/record_data/",
+                       help="Path to recorded data")
+        
     args = parser.parse_args()
     
     # Log command line arguments
@@ -628,6 +632,23 @@ def main():
             episode_idx=args.episode_idx,
             step_vis=args.step_vis  # Pass visualization flag
         )
+
+    elif args.mode == "recorded_data":
+        dataset, indices = load_dataset(
+            repo_id=args.repo_id,
+            root=args.root,
+            episode_idx=args.episode_idx
+        )
+
+        test_with_recorded_data(
+            policy=policy,
+            record_dir=args.record_dir,
+            device=device,
+            output_dir=output_dir,
+            dataset=dataset,
+            indices=indices
+        )
+
     else:
         try:
             start_time = time.time()
@@ -690,6 +711,265 @@ def main():
                 f.write(f"Total Steps: {n_steps}\n")
                 f.write(f"Total Time: {total_time:.2f} seconds\n")
                 f.write(f"Average FPS: {avg_fps:.2f}\n")
+
+
+
+
+def test_with_recorded_data(policy, record_dir, device, output_dir, dataset, indices):
+    """使用录制的数据进行测试
+    
+    Args:
+        policy: 要测试的策略模型
+        record_dir: 录制数据的目录路径
+        device: 运行设备
+        output_dir: 输出目录
+    """
+    import json
+    # 加载录制的数据
+    record_dir = Path(record_dir)
+    
+    # 加载状态数据
+    with open(record_dir / "state_data.json", "r") as f:
+        state_data = json.load(f)
+    
+    # 设置视频捕获
+    video_path = str(record_dir / "000000000.mp4")
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        # 尝试备用文件名
+        video_path = str(record_dir / "000000000.mp4")
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise ValueError(f"无法打开视频文件: {video_path}")
+    
+    # 创建tensorboard writer
+    writer = tb.SummaryWriter(output_dir / "tensorboard")
+    
+    # 存储所有动作用于可视化
+    all_actions = []
+    
+    # 创建动作历史数据存储 - 用于绘制时间序列曲线
+    action_history = {
+        'timestamps': [],
+        'values': []
+    }
+    
+    # 定义关节名称（用于图例）
+    joint_names = [
+        "左肩pitch", "左肩roll", "左肩yaw", "左肘", "左腕roll", "左腕pitch", "左腕yaw",
+        "右肩pitch", "右肩roll", "右肩yaw", "右肘", "右腕roll", "右腕pitch", "右腕yaw"
+    ]
+    if len(joint_names) < 26:  # 如果实际关节数量超过预定义名称
+        for i in range(len(joint_names), 26):
+            joint_names.append(f"Joint {i}")
+
+    # 保存第一帧变换前后的图像
+    if_save_first_frame = True
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=1,
+        sampler=indices,
+        num_workers=0,
+        pin_memory=True
+    )
+
+    # 定义数据源类型枚举
+    class DataSource:
+        RECORDED_DATA = "recorded_data"  # 使用录制的数据
+        DATASET = "dataset"              # 使用数据集
+        REAL_TIME = "real_time"          # 实时数据
+        
+    # 设置当前使用的数据源
+    use_which_data_source = DataSource.RECORDED_DATA
+    
+    # 创建固定大小的图形窗口
+    plt.figure(figsize=(16, 8))
+    
+    # 设置最大历史长度
+    max_history_length = 50  # 最多显示50帧的历史数据
+
+    try:
+        start_time = time.time()
+        frame_idx = 0
+
+        for step, batch in enumerate(dataloader):
+            # Move batch to device
+            batch = {k: v.to(device) for k, v in batch.items()}
+            
+            # Process observation for policy
+            observation = {
+                "observation.state": batch["observation.state"],
+                "observation.image.left": batch["observation.image.left"],
+            }
+
+
+
+            ret, frame = cap.read()
+            if not ret:
+                break
+                
+            # 获取对应的状态数据
+            if frame_idx >= len(state_data):
+                break
+            current_state = state_data[frame_idx]["state"]
+            
+            # 调整BGR到RGB
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # 处理图像
+            if if_save_first_frame:
+                raw_image = frame.copy()
+                plt.imsave(output_dir / f"frame_{frame_idx}.png", raw_image)
+
+            left_image = transform_image(frame)
+
+            if if_save_first_frame:
+                processed_image = left_image.squeeze(0).cpu().numpy().transpose(1, 2, 0)
+                plt.imsave(output_dir / f"processed_image_step_{frame_idx}.png", 
+                        processed_image)
+                if_save_first_frame = False
+
+            left_image = left_image.unsqueeze(0).to(device)
+            
+            # 处理状态
+            state = torch.tensor(current_state, dtype=torch.float32)
+            state = state.unsqueeze(0).to(device)
+            
+            # 构建观测字典
+            observation_from_recorded_data = {
+                "observation.state": state,
+                "observation.image.left": left_image,
+            }
+
+            # import pdb; pdb.set_trace()
+            
+            # observation["observation.state"] = observation_from_recorded_data["observation.state"]
+            observation["observation.image.left"] = observation_from_recorded_data["observation.image.left"]
+            if frame_idx == 0:
+                observation["observation.state"] = torch.zeros(1, 26, dtype=torch.float32).to(device)
+                observation["observation.state"] = torch.tensor([[-0.05, 0.071, 0.091, -1.3767406940460205, 0.2229975163936615, -0.1671057641506195, -0.1857181191444397, -0.20743083953857422, -0.06330453604459763, 0.11242031306028366, -1.2058242559432983, 0.06342902779579163, -0.023585783317685127, -0.22980284690856934, 0.12083300203084946, 0.15208299458026886, 0.16249999403953552, 0.07916700094938278, 5.84375, 1.5791670083999634, 0.3760420083999634, 0.3656249940395355, 0.37083300948143005, 0.5843750238418579, 5.5416669845581055, 6.209374904632568]], dtype=torch.float32).to(device)
+            # 打印图像形状和值的比较
+            print("\n图像对比:")
+            print(f"left_image shape: {left_image.shape}")
+            print(f"batch image shape: {batch['observation.image.left'].shape}")
+            print(f"left_image value range: [{left_image.min():.3f}, {left_image.max():.3f}]")
+            print(f"batch image value range: [{batch['observation.image.left'].min():.3f}, {batch['observation.image.left'].max():.3f}]")
+            
+            # 计算差异
+            diff = (left_image - batch["observation.image.left"]).abs()
+            print(f"平均绝对差异: {diff.mean():.3f}")
+            print(f"最大绝对差异: {diff.max():.3f}")
+
+
+            # 使用策略生成动作
+            with torch.inference_mode():
+                action = policy.select_action(observation)
+            
+            # 获取numpy格式的动作
+            numpy_action = action.squeeze(0).cpu().numpy()
+            all_actions.append(numpy_action)
+            
+            # 更新动作历史数据
+            action_history['timestamps'].append(frame_idx)
+            action_history['values'].append(numpy_action)
+            
+            # 限制历史数据长度
+            if len(action_history['timestamps']) > max_history_length:
+                action_history['timestamps'] = action_history['timestamps'][-max_history_length:]
+                action_history['values'] = action_history['values'][-max_history_length:]
+            
+            # 记录到tensorboard
+            if frame_idx % 10 == 0:
+                elapsed_time = time.time() - start_time
+                fps = (frame_idx + 1) / elapsed_time
+                writer.add_scalar("Performance/fps", fps, frame_idx)
+                writer.add_images("Images/input", left_image, frame_idx)
+                
+                # 记录动作
+                for i in range(action.shape[1]):
+                    writer.add_scalar(f"Actions/Joint_{i}", 
+                                    numpy_action[i], frame_idx)
+                
+                # 记录状态值
+                for i in range(state.shape[1]):
+                    writer.add_scalar(f"States/Dim_{i}", 
+                                    current_state[i], frame_idx)
+                
+                logging.info(f"Frame: {frame_idx}, FPS: {fps:.2f}")
+            
+            # 仅使用单一图表显示左臂关节角度曲线
+            plt.clf()  # 清除当前图形
+            
+            # 定义颜色映射，为不同关节分配不同颜色
+            colors = plt.cm.tab10(np.linspace(0, 1, 7))  # 只使用7种颜色
+            
+            # 只绘制左臂关节曲线(0-6)
+            joints_to_plot = range(min(7, len(numpy_action)))
+            
+            for i in joints_to_plot:
+                # 提取该关节的历史值
+                joint_history = [values[i] for values in action_history['values']]
+                plt.plot(action_history['timestamps'], joint_history, 
+                        label=f"Joint {i}", color=colors[i], 
+                        linewidth=2, alpha=0.8)
+            
+            # 标记当前时间点
+            plt.axvline(x=frame_idx, color='r', linestyle='--', alpha=0.5)
+            
+            plt.title(f"Left Arm Joint Angles - Frame {frame_idx}")
+            plt.xlabel("Frame")
+            plt.ylabel("Joint Angle")
+            plt.legend(fontsize='small')
+            plt.grid(True, alpha=0.3)
+            
+            # 设置x轴范围，显示最近的历史
+            if len(action_history['timestamps']) > 0:
+                min_time = max(0, frame_idx - max_history_length)
+                plt.xlim(min_time, frame_idx + 5)
+            
+            # 显示当前帧的关节值
+            if len(numpy_action) >= 7:
+                left_arm_values = numpy_action[:7]
+                value_text = "Current values: " + ", ".join([f"{v:.3f}" for v in left_arm_values])
+                plt.figtext(0.5, 0.01, value_text, ha='center', fontsize=9, 
+                           bbox=dict(facecolor='white', alpha=0.8, boxstyle='round'))
+            
+            plt.tight_layout()
+            plt.draw()
+            plt.pause(0.01)
+            
+            frame_idx += 1
+            
+    except Exception as e:
+        logging.error(f"测试过程中出错: {e}")
+        import traceback
+        traceback.print_exc()
+        
+    finally:
+        cap.release()
+        
+        if all_actions:
+            # 计算最终统计信息
+            logging.info(f"\n最终统计:")
+            logging.info(f"总帧数: {frame_idx}")
+            
+            # 记录最终指标
+            writer.add_hparams(
+                {"test_mode": "recorded_data"},
+                {
+                    "total_frames": frame_idx,
+                    "avg_fps": frame_idx / (time.time() - start_time)
+                }
+            )
+            
+            # 可视化动作轨迹
+            all_actions = np.stack(all_actions)
+            visualize_action_trajectory(all_actions, 
+                                     output_dir / "predicted_trajectory.png")
+            
+        writer.close()
+
 
 if __name__ == "__main__":
     main() 

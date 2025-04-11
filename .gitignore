@@ -163,3 +163,6 @@ dino_eval/
 home/
 test_results*/
 my_project/
+gradient_logs/
+.cursorignore
+*.mp4

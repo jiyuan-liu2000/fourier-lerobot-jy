@@ -236,6 +236,7 @@ class DiffusionPolicy(
         batch = self.normalize_inputs(batch)
         # 处理多相机图像输入
         if len(self.expected_image_keys) > 0:
+            import pdb; pdb.set_trace() 
             batch = dict(batch)
             batch["observation.images"] = torch.stack([batch[k] for k in self.expected_image_keys], dim=-4) #batch["observation.images"].shape torch.Size([64, 2, 1, 3, 224, 224])
         # 对目标数据进行归一化
@@ -472,6 +473,7 @@ class DiffusionModel(nn.Module):
         # 输入验证
         assert set(batch).issuperset({"observation.state", "action", "action_is_pad"})
         assert "observation.images" in batch or "observation.environment_state" in batch
+        import pdb; pdb.set_trace()
         n_obs_steps = batch["observation.state"].shape[1]
         horizon = batch["action"].shape[1]
         assert horizon == self.config.horizon

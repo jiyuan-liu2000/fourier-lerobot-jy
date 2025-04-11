@@ -1,19 +1,19 @@
 '''
 Author: Jiyuan Liu
 Date: 2025-02-27 21:44:47
-LastEditors: Jiyuan Liu
-LastEditTime: 2025-03-17 14:50:33
-FilePath: /fourier-lerobot/lerobot/common/policies/scaledp/configuration_scaledp.py
+LastEditors: WenJiawei
+LastEditTime: 2025-03-19 17:49:32
+FilePath: /fourier-lerobot-jy/lerobot/common/policies/scaledp/configuration_scaledp.py
 Description: 
 
 Copyright (c) 2024 by Fourier Intelligence Co. Ltd , All Rights Reserved. 
 '''
 from dataclasses import dataclass, field
 
-from lerobot.common.optim.optimizers import AdamConfig
-from lerobot.common.optim.schedulers import DiffuserSchedulerConfig
-from lerobot.configs.policies import PreTrainedConfig
-from lerobot.configs.types import NormalizationMode
+# from lerobot.common.optim.optimizers import AdamConfig
+# from lerobot.common.optim.schedulers import DiffuserSchedulerConfig
+# from lerobot.configs.policies import PreTrainedConfig
+# from lerobot.configs.types import NormalizationMode
 
 MODEL_STRUCTURE = {
     'ScaleDP_Ti': {'depth': 8, 'n_emb': 256, 'num_heads': 4, }, # 10M
@@ -22,26 +22,49 @@ MODEL_STRUCTURE = {
     'ScaleDP_L': {'depth': 24, 'n_emb': 1024, 'num_heads': 16, }, # 457M
     'ScaleDP_H': {'depth': 32, 'n_emb': 1280, 'num_heads': 16, }, # 1B
 }
-@PreTrainedConfig.register_subclass("scale_dp")
+# @PreTrainedConfig.register_subclass("scale_dp")
 @dataclass
-class ScaleDPPolicyConfig(PreTrainedConfig):
+class ScaleDPPolicyConfig():
     '''
     Configuration for ScaleDP policy head
     '''
     n_obs_steps: int = 3  # number of observation steps
     horizon: int = 32
-    n_action_setps: int = 8
+    n_action_steps: int = 8
 
     model_size: str = "none"
     
-
-    normalization_mapping: dict[str, NormalizationMode] = field(
+    input_shapes: dict[str, list[int]] = field(
         default_factory=lambda: {
-            "VISUAL": NormalizationMode.MEAN_STD,
-            "STATE": NormalizationMode.MEAN_STD,
-            "ACTION": NormalizationMode.MEAN_STD,
+            "observation.image": [3, 96, 96],
+            "observation.state": [2],
         }
     )
+    image_features: dict[str, list[int]] = field(
+        default_factory=lambda: {
+            "observation.image": [3, 96, 96],
+        }
+    )
+    output_shapes: dict[str, list[int]] = field(
+        default_factory=lambda: {
+            "action": [2],
+        }
+    )
+    input_normalization_modes: dict[str, str] = field(
+        default_factory=lambda: {
+            "observation.image": "mean_std",
+            "observation.state": "min_max",
+        }
+    )
+    output_normalization_modes: dict[str, str] = field(default_factory=lambda: {"action": "min_max"})
+
+    # normalization_mapping: dict[str, NormalizationMode] = field(
+    #     default_factory=lambda: {
+    #         "VISUAL": NormalizationMode.MEAN_STD,
+    #         "STATE": NormalizationMode.MEAN_STD,
+    #         "ACTION": NormalizationMode.MEAN_STD,
+    #     }
+    # )
 
     # vision backbone
     vision_backbone: str = "resnet50"
@@ -80,7 +103,7 @@ class ScaleDPPolicyConfig(PreTrainedConfig):
     
 
     def __post_init__(self):
-        super().__post_init__()
+        # super().__post_init__()
         if self.model_size != "none":
             self.depth = MODEL_STRUCTURE[self.model_size]['depth'] # number of DiT blocks
             self.n_emb = MODEL_STRUCTURE[self.model_size]['n_emb'] # embedding size
@@ -122,30 +145,30 @@ class ScaleDPPolicyConfig(PreTrainedConfig):
                 )
 
         
-    def get_optimizer_preset(self) -> AdamConfig:
-        return AdamConfig(
-            lr=self.optimizer_lr,
-            betas=self.optimizer_betas,
-            eps=self.optimizer_eps,
-            weight_decay=self.optimizer_weight_decay,
-        )
+    # def get_optimizer_preset(self) -> AdamConfig:
+    #     return AdamConfig(
+    #         lr=self.optimizer_lr,
+    #         betas=self.optimizer_betas,
+    #         eps=self.optimizer_eps,
+    #         weight_decay=self.optimizer_weight_decay,
+    #     )
     
-    # def get_scheduler_preset(self) -> None:
+    # # def get_scheduler_preset(self) -> None:
+    # #     return None
+    # def get_scheduler_preset(self) -> DiffuserSchedulerConfig:
+    #     return DiffuserSchedulerConfig(
+    #         name=self.scheduler_name,
+    #         num_warmup_steps=self.scheduler_warmup_steps,
+    #     )
+
+    # @property
+    # def observation_delta_indices(self) -> list:
+    #     return list(range(1 - self.n_obs_steps, 1))
+
+    # @property
+    # def action_delta_indices(self) -> list:
+    #     return list(range(1 - self.n_obs_steps, 1 - self.n_obs_steps + self.horizon))
+
+    # @property
+    # def reward_delta_indices(self) -> None:
     #     return None
-    def get_scheduler_preset(self) -> DiffuserSchedulerConfig:
-        return DiffuserSchedulerConfig(
-            name=self.scheduler_name,
-            num_warmup_steps=self.scheduler_warmup_steps,
-        )
-
-    @property
-    def observation_delta_indices(self) -> list:
-        return list(range(1 - self.n_obs_steps, 1))
-
-    @property
-    def action_delta_indices(self) -> list:
-        return list(range(1 - self.n_obs_steps, 1 - self.n_obs_steps + self.horizon))
-
-    @property
-    def reward_delta_indices(self) -> None:
-        return None

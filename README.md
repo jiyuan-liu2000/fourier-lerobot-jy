@@ -481,7 +481,7 @@ LeRobot框架中使用了两种归一化策略：均值标准差归一化和最�
    ```
 
 3. **分段线性映射**：
-   ```python
+```python
    def piecewise_linear_normalize(data, thresholds=[0.1, 1.0, 5.0]):
        abs_changes = np.abs(data - np.mean(data))
        max_change = np.max(abs_changes)
@@ -550,3 +550,59 @@ LeRobot框架中使用了两种归一化策略：均值标准差归一化和最�
 
 
 
+Logs will be synced with wandb.
+INFO 2025-03-24 14:52:19 n/logger.py:133 Track this run --> https://wandb.ai/3172499687wjw/lerobot/runs/a8igr0hk
+INFO 2025-03-24 14:52:19 ts/train.py:428 make_dataset
+WARNING 2025-03-24 14:52:19 s/factory.py:68 There might be a mismatch between your training dataset (dataset_repo_id='/home/fourier/data/final/fourier_pnp_coke') and your environment (cfg.env.name='real_world').
+INFO 2025-03-24 14:52:19 s/factory.py:96 Using local dataset_root: /home/fourier/data/final/
+INFO 2025-03-24 14:52:19 ts/train.py:444 make_policy
+using model size ScaleDP_B with depth 12, n_emb 768, num_heads 12
+Using cache found in /home/fourier/.cache/torch/hub/facebookresearch_dinov2_main
+/home/fourier/.cache/torch/hub/facebookresearch_dinov2_main/dinov2/layers/swiglu_ffn.py:51: UserWarning: xFormers is not available (SwiGLU)
+  warnings.warn("xFormers is not available (SwiGLU)")
+/home/fourier/.cache/torch/hub/facebookresearch_dinov2_main/dinov2/layers/attention.py:33: UserWarning: xFormers is not available (Attention)
+  warnings.warn("xFormers is not available (Attention)")
+/home/fourier/.cache/torch/hub/facebookresearch_dinov2_main/dinov2/layers/block.py:40: UserWarning: xFormers is not available (Block)
+  warnings.warn("xFormers is not available (Block)")
+INFO 2025-03-24 14:52:20 nsformer.py:122 using MLP layer as FFN
+/home/fourier/fourier-lerobot-jy/lerobot/scripts/train.py:454: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  grad_scaler = GradScaler(enabled=cfg.use_amp)
+INFO 2025-03-24 14:52:22 on/logger.py:40 Output dir: /home/fourier/models/03-24-14-52_real_world_dit_pnp_coke_arm_loss2_horizon64_batch128_down4096_img112_224_loss_uncertainty
+INFO 2025-03-24 14:52:22 ts/train.py:465 cfg.env.task=None
+INFO 2025-03-24 14:52:22 ts/train.py:466 cfg.training.offline_steps=300000 (300K)
+INFO 2025-03-24 14:52:22 ts/train.py:467 cfg.training.online_steps=0
+INFO 2025-03-24 14:52:22 ts/train.py:468 offline_dataset.num_samples=75777 (76K)
+INFO 2025-03-24 14:52:22 ts/train.py:469 offline_dataset.num_episodes=181
+INFO 2025-03-24 14:52:22 ts/train.py:470 num_learnable_params=154266842 (154M)
+INFO 2025-03-24 14:52:22 ts/train.py:471 num_total_params=154267004 (154M)
+INFO 2025-03-24 14:52:22 ts/train.py:548 Start offline training on a fixed dataset
+
+
+
+INFO 2025-03-24 14:53:59 on/logger.py:40 Output dir: /home/fourier/models/03-24-14-53_real_world_diffusion_pnp_coke_arm_loss2_horizon64_batch128_down4096_img112_224_loss_uncertainty
+INFO 2025-03-24 14:53:59 ts/train.py:465 cfg.env.task=None
+INFO 2025-03-24 14:53:59 ts/train.py:466 cfg.training.offline_steps=300000 (300K)
+INFO 2025-03-24 14:53:59 ts/train.py:467 cfg.training.online_steps=0
+INFO 2025-03-24 14:53:59 ts/train.py:468 offline_dataset.num_samples=75777 (76K)
+INFO 2025-03-24 14:53:59 ts/train.py:469 offline_dataset.num_episodes=181
+INFO 2025-03-24 14:53:59 ts/train.py:470 num_learnable_params=993421050 (993M)
+INFO 2025-03-24 14:53:59 ts/train.py:471 num_total_params=1015477788 (1B)
+INFO 2025-03-24 14:53:59 ts/train.py:548 Start offline training on a fixed dataset
+
+
+参数量对比
+
+确认初始化方式，mseloss初始时的数值问题
+
+确认视觉部分，归一化
+
+sample问题，导致eval与train的不一致问题
+
+#### 调试日志 (2025-04-11)
+大总结
+Diffusion Policy总结
+
+ScaleDP调试
+目前进度
+对Scheduler部分进行调试
+使用v_prediction训练

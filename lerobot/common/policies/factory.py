@@ -66,6 +66,11 @@ def get_policy_and_config_classes(name: str) -> tuple[Policy, object]:
         from lerobot.common.policies.vqbet.modeling_vqbet import VQBeTPolicy
 
         return VQBeTPolicy, VQBeTConfig
+    elif name == "scaledp":
+        from lerobot.common.policies.scaledp.configuration_scaledp import ScaleDPPolicyConfig
+        from lerobot.common.policies.scaledp.modeling_scaledp import ScaleDPPolicy
+
+        return ScaleDPPolicy, ScaleDPPolicyConfig
     else:
         raise NotImplementedError(f"Policy with name {name} is not implemented.")
 

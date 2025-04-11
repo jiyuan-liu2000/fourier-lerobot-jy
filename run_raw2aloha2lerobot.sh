@@ -1,6 +1,16 @@
 #!/bin/bash
 ###
  # @Author: WenJiawei
+ # @Date: 2025-02-25 13:25:29
+ # @LastEditors: WenJiawei
+ # @LastEditTime: 2025-03-31 14:07:44
+ # @FilePath: /fourier-lerobot-jy/run_raw2aloha2lerobot.sh
+ # @Description: 
+ # 
+ # Copyright (c) 2025 by Fourier Intelligence Co. Ltd, All Rights Reserved. 
+### 
+###
+ # @Author: WenJiawei
  # @Date: 2025-02-25 00:25:29
  # @LastEditors: WenJiawei
  # @LastEditTime: 2025-02-25 03:40:47

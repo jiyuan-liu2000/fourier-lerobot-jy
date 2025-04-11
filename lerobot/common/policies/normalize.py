@@ -34,6 +34,8 @@ def create_stats_buffers(
     """
     stats_buffers = {}
 
+    # import pdb; pdb.set_trace()
+
     for key, mode in modes.items():
         assert mode in ["mean_std", "min_max"]
 
@@ -134,7 +136,7 @@ class Normalize(nn.Module):
     def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
         batch = dict(batch)  # shallow copy avoids mutating the input batch
         for key, mode in self.modes.items():
-            import pdb; pdb.set_trace()
+            # import pdb; pdb.set_trace()
             buffer = getattr(self, "buffer_" + key.replace(".", "_"))
 
             if mode == "mean_std":
@@ -263,6 +265,11 @@ class AdaptiveNormalize(nn.Module):
         for key, mode in self.modes.items():
             buffer = getattr(self, "buffer_" + key.replace(".", "_"))
             
+            # 打印buffer内容
+            print(f"Key: {key}")
+            for buffer_name, buffer_value in buffer.items():
+                print(f"  {buffer_name}: {buffer_value}")
+
             # 检查是否是动作数据且需要分组归一化
             if key == "action" and self.joint_groups and key in batch:
                 # 进行常规归一化

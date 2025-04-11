@@ -3,7 +3,7 @@
  # @Author: WenJiawei
  # @Date: 2025-03-04 13:08:29
  # @LastEditors: WenJiawei
- # @LastEditTime: 2025-03-04 13:16:58
+ # @LastEditTime: 2025-04-01 16:51:48
  # @FilePath: /fourier-lerobot-jy/visualize_dataset.sh
  # @Description: 
  # 
@@ -13,7 +13,7 @@
 # 设置默认值
 DEFAULT_ROOT="/home/fourier/data"
 DEFAULT_REPO="final/fourier_pnp_coke"
-DEFAULT_EPISODE=1
+DEFAULT_EPISODE=0
 
 # 解析命令行参数
 DATA_ROOT=${1:-$DEFAULT_ROOT}
