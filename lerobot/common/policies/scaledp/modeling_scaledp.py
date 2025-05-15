@@ -2,7 +2,7 @@
 Author: Jiyuan Liu
 Date: 2025-02-27 21:44:47
 LastEditors: WenJiawei
-LastEditTime: 2025-04-11 13:21:21
+LastEditTime: 2025-04-11 18:21:02
 FilePath: /fourier-lerobot-jy/lerobot/common/policies/scaledp/modeling_scaledp.py
 Description: 
 
@@ -325,7 +325,7 @@ class ScaleDPPolicy(
         batch = self.normalize_targets(batch)
         
         # 注册梯度钩子 (每100步注册一次，减少开销)
-        if self.training and random.random() < 0.01:
+        if self.training and random.random() < 0.001:
             self.register_gradient_hooks()
         
         # 前向传播
@@ -336,7 +336,7 @@ class ScaleDPPolicy(
             self.grad_stats["step"] += 1
             
             # 每500步保存一次梯度统计
-            if self.grad_stats["step"] % 500 == 0:
+            if self.grad_stats["step"] % 1000 == 0:
                 self.save_gradient_stats()
                 
             # 详细记录小梯度模块
@@ -850,18 +850,40 @@ class ScaleDP(nn.Module):
         # sample_max_value: float = 1,
         # timestep_spacing: str = "leading",
         # rescale_betas_zero_snr: bool = False
-        self.noise_scheduler = DDIMScheduler(
-            num_train_timesteps=config.num_train_timesteps, # 100
-            beta_schedule='squaredcos_cap_v2',
-            clip_sample=True,
-            set_alpha_to_one=True,
-            steps_offset=0,
-            prediction_type='epsilon',
-            # prediction_type='v_prediction',
-            timestep_spacing='trailing'
-        )
 
-
+        if self.config.prediction_type == "epsilon":
+            self.noise_scheduler = DDIMScheduler(
+                num_train_timesteps=config.num_train_timesteps, # 100
+                beta_schedule='squaredcos_cap_v2',
+                clip_sample=True,
+                set_alpha_to_one=True,
+                steps_offset=0,
+                prediction_type='epsilon',
+                # prediction_type='v_prediction',
+                timestep_spacing='trailing'
+            )
+        elif self.config.prediction_type == "v_prediction":
+            self.noise_scheduler = DDIMScheduler(
+                num_train_timesteps=config.num_train_timesteps, # 100
+                beta_schedule='squaredcos_cap_v2',
+                clip_sample=True,
+                set_alpha_to_one=True,
+                steps_offset=0,
+                # prediction_type='epsilon',
+                prediction_type='v_prediction',
+                timestep_spacing='trailing')
+        elif self.config.prediction_type == "sample":
+            self.noise_scheduler = DDIMScheduler(
+                num_train_timesteps=config.num_train_timesteps, # 100
+                beta_schedule='squaredcos_cap_v2',
+                clip_sample=True,
+                set_alpha_to_one=True,
+                steps_offset=0,
+                prediction_type='sample',
+                timestep_spacing='trailing')
+        else :
+            raise ValueError(f"不支持的预测类型: {self.config.prediction_type}。请使用 'epsilon'、'v_prediction' 或 'sample'。")
+            
         # num_train_timesteps: int = 1000,
         # beta_start: float = 0.0001,
         # beta_end: float = 0.02,
@@ -1014,16 +1036,16 @@ class ScaleDP(nn.Module):
         images_per_camera = einops.rearrange(batch["observation.images"], "b s n ... -> n (b s) ...")
         
         # 计算图像数值范围
-        for i, images in enumerate(images_per_camera):
-            min_val = torch.min(images).item()
-            max_val = torch.max(images).item()
-            mean_val = torch.mean(images).item()
-            std_val = torch.std(images).item()
-            print(f"相机 {i} 图像统计:")
-            print(f"  最小值: {min_val:.3f}")
-            print(f"  最大值: {max_val:.3f}") 
-            print(f"  均值: {mean_val:.3f}")
-            print(f"  标准差: {std_val:.3f}")
+        # for i, images in enumerate(images_per_camera):
+        #     min_val = torch.min(images).item()
+        #     max_val = torch.max(images).item()
+        #     mean_val = torch.mean(images).item()
+        #     std_val = torch.std(images).item()
+        #     print(f"相机 {i} 图像统计:")
+        #     print(f"  最小值: {min_val:.3f}")
+        #     print(f"  最大值: {max_val:.3f}") 
+        #     print(f"  均值: {mean_val:.3f}")
+        #     print(f"  标准差: {std_val:.3f}")
         
         img_features_list = torch.cat(
                     [
@@ -1046,9 +1068,19 @@ class ScaleDP(nn.Module):
             ).long()
         
         timesteps, noise = timesteps.to(actions.device), noise.to(actions.device)
-        noisy_actions = torch.cat([self.noise_scheduler.add_noise(
-            actions, noise[i], timesteps)
-            for i in range(len(noise))], dim=0)  # [num_noise_samples * B, Ta, action_dim]
+
+        if self.config.prediction_type == "epsilon" or  self.config.prediction_type == "sample":
+            noisy_actions = torch.cat([self.noise_scheduler.add_noise(
+                actions, noise[i], timesteps)
+                for i in range(len(noise))], dim=0)  # [num_noise_samples * B, Ta, action_dim]
+        elif self.config.prediction_type == "v_prediction":
+            # import pdb; pdb.set_trace() 
+            noisy_actions = torch.cat([self.noise_scheduler.add_noise(
+                actions, noise[i], timesteps)
+                for i in range(len(noise))], dim=0)  # [num_noise_samples * B, Ta, action_dim]
+            velocity_gt = torch.cat([self.noise_scheduler.get_velocity(
+                actions, noise[i], timesteps)
+                for i in range(len(noise))], dim=0)  # [num_noise_samples * B, Ta, action_dim]
 
         noisy_actions = noisy_actions.to(dtype=actions.dtype)
         assert img_features.ndim == 3
@@ -1064,8 +1096,18 @@ class ScaleDP(nn.Module):
         # import pdb;pdb.set_trace()
         noise_pred = self.model_forward(noisy_actions, timesteps, global_cond=hidden_states, states=states)
         noise = noise.view(noise.size(0) * noise.size(1), *noise.size()[2:])
-        loss = torch.nn.functional.mse_loss(noise_pred, noise, reduction='none')
-        loss = (loss * ~is_pad.unsqueeze(-1)).mean()
+
+        if self.config.prediction_type == "epsilon":
+            loss = torch.nn.functional.mse_loss(noise_pred, noise, reduction='none')
+            loss = (loss * ~is_pad.unsqueeze(-1)).mean()
+        elif self.config.prediction_type == "v_prediction":
+            loss = torch.nn.functional.mse_loss(noise_pred, velocity_gt, reduction='none')
+            loss = (loss * ~is_pad.unsqueeze(-1)).mean()
+        elif self.config.prediction_type == "sample":
+            # 计算原始样本和预测样本之间的MSE损失
+            target_sample = actions.repeat(self.num_noise_samples, 1, 1)
+            loss = torch.nn.functional.mse_loss(noise_pred, target_sample, reduction='none')
+            loss = (loss * ~is_pad.unsqueeze(-1)).mean()
         return loss
 
     def generate_actions(self, batch: dict):
@@ -1152,7 +1194,7 @@ class ScaleDP(nn.Module):
         if self.is_tinyvla:
             global_cond = self.global_1d_pool(global_cond.permute(0, 2, 1)).squeeze(-1)
             global_cond = self.norm_after_pool(global_cond)
-        else:
+        else: 
             global_cond = global_cond.squeeze(1)
         global_cond = torch.cat([global_cond, states], dim=-1) if states is not None else global_cond
         global_cond = self.combine(global_cond)
@@ -1165,6 +1207,7 @@ class ScaleDP(nn.Module):
 
         x = self.x_embedder(x) + self.pos_embed.to(device=x.device, dtype=x.dtype)  # (N, T, D), where T = prediction_horizon
         t = self.t_embedder(t)  # (N, D)
+
 
         global_cond = global_cond[:,-1]
         if self.obs_as_cond:

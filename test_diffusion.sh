@@ -3,7 +3,7 @@
  # @Author: WenJiawei
  # @Date: 2025-03-04 15:08:29
  # @LastEditors: WenJiawei
- # @LastEditTime: 2025-04-11 11:04:14
+ # @LastEditTime: 2025-04-14 09:52:43
  # @FilePath: /fourier-lerobot-jy/test_diffusion.sh
  # @Description: Script for testing diffusion policy
  # 
@@ -11,7 +11,7 @@
 ### 
 
 # Default values
-MODEL_PATH="/home/fourier/models/03-28-11-09_real_world_dit_pnp_coke_arm_loss2_horizon64_batch128_down4096_img112_224_loss_uncertainty/checkpoints/060000/pretrained_model"
+MODEL_PATH="/home/fourier/models/04-13-23-43_real_world_dit_pnp_coke_arm_loss2_horizon64_batch128_down4096_img112_224_loss_uncertainty/checkpoints/040000/pretrained_model"
 ROOT="/home/fourier/data"
 REPO_ID="final/fourier_pnp_coke"
 EPISODE_IDX=0

@@ -266,9 +266,9 @@ class AdaptiveNormalize(nn.Module):
             buffer = getattr(self, "buffer_" + key.replace(".", "_"))
             
             # 打印buffer内容
-            print(f"Key: {key}")
-            for buffer_name, buffer_value in buffer.items():
-                print(f"  {buffer_name}: {buffer_value}")
+            # print(f"Key: {key}")
+            # for buffer_name, buffer_value in buffer.items():
+            #     print(f"  {buffer_name}: {buffer_value}")
 
             # 检查是否是动作数据且需要分组归一化
             if key == "action" and self.joint_groups and key in batch:

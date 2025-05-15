@@ -32,7 +32,7 @@ training:
   offline_steps: 300000
   online_steps: 0
   eval_freq: -1
-  save_freq: 20000
+  save_freq: 5000
   save_checkpoint: true
   max_checkpoints: 3
 
@@ -147,6 +147,7 @@ policy:
   # training
   num_train_timesteps: 100
   eval: False
+  prediction_type: v_prediction # v_prediction epsilon sample
 
   # Training presets
   optimizer_lr: 1e-4

@@ -2,7 +2,7 @@
 Author: Jiyuan Liu
 Date: 2025-02-27 21:44:47
 LastEditors: WenJiawei
-LastEditTime: 2025-03-19 17:49:32
+LastEditTime: 2025-04-11 16:03:40
 FilePath: /fourier-lerobot-jy/lerobot/common/policies/scaledp/configuration_scaledp.py
 Description: 
 
@@ -88,6 +88,7 @@ class ScaleDPPolicyConfig():
     # training
     num_train_timesteps: int = 100
     eval: bool = False
+    prediction_type: str = "epsilon" # v_prediction epsilon
 
     # Training presets
     optimizer_lr: float = 1e-4
