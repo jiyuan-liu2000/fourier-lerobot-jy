@@ -1,0 +1,2 @@
+Total Steps: 428
+Average MSE Loss: 0.0945
